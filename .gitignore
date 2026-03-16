@@ -1,0 +1,25 @@
+# Secrets — never commit
+.streamlit/secrets.toml
+
+# Database (local only — Streamlit Cloud uses ephemeral storage)
+data/signals.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Logs
+logs/
+
+# Backtest outputs (large, not needed for the app)
+backtest results/
+
+# One-time migration scripts
+migrate_to_supabase.py
+
+# OS
+.DS_Store

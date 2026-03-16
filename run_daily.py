@@ -1,0 +1,302 @@
+"""
+run_daily.py — Headless daily signal runner.
+
+Fetches price data, computes indicators, calls Claude for signals,
+and saves BUY/SELL results to the SQLite history DB.
+
+Run manually:  python3 run_daily.py
+Scheduled via: ~/Library/LaunchAgents/com.swingtrader.daily.plist
+"""
+
+import sys
+import time
+import os
+from datetime import datetime
+
+import psycopg2.extras
+import yfinance as yf
+import pandas as pd
+
+from config import WATCHLIST, HISTORY_DAYS, ANTHROPIC_API_KEY, VIX_MAX
+from indicators import compute_indicators
+from fundamentals import fetch_fundamentals
+from signal_engine import get_signal
+from history import save_signal, get_performance_stats, get_conn
+from notify import send_telegram, send_daily_summary, send_push, send_exit_alert
+
+# ── Set to False to fall back to watchlist only ───────────────────────────────
+USE_SP500 = True
+
+
+def _get_sp500_tickers():
+    """Fetch current S&P 500 tickers from Wikipedia."""
+    import urllib.request
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/120.0.0.0 Safari/537.36"
+    })
+    try:
+        with urllib.request.urlopen(req) as resp:
+            html = resp.read().decode("utf-8")
+        tickers = pd.read_html(html)[0]["Symbol"].tolist()
+        # Normalize BRK.B → BRK-B style used by yfinance
+        return [t.replace(".", "-") for t in tickers]
+    except Exception as e:
+        print(f"  WARNING: Could not fetch S&P 500 list ({e}). Falling back to watchlist.")
+        return list(WATCHLIST)
+
+
+def _get_vix() -> float | None:
+    """Fetch the latest VIX closing price. Returns None on failure."""
+    try:
+        raw = yf.download("^VIX", period="5d", progress=False, auto_adjust=True)
+        return float(raw["Close"].dropna().iloc[-1].item())
+    except Exception:
+        return None
+
+
+def _already_signaled_today(ticker: str, today: str) -> bool:
+    """Return True if a BUY/SELL signal was already saved for this ticker today."""
+    try:
+        conn = get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM signals WHERE ticker=%s AND date=%s", (ticker, today)
+            )
+            row = cur.fetchone()
+        conn.close()
+        return row is not None
+    except Exception:
+        return False
+
+
+def _parse_price(s) -> float | None:
+    """Parse a price string like '$185.50' or '185-190' → float (lower bound for ranges)."""
+    if not s:
+        return None
+    s = str(s).replace("$", "").replace(",", "").strip()
+    if "-" in s:
+        s = s.split("-")[0].strip()
+    try:
+        return float(s)
+    except Exception:
+        return None
+
+
+def _get_open_positions() -> list[dict]:
+    """Return all open BUY positions enriched with current price and unrealized P&L."""
+    try:
+        conn = get_conn()
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id, ticker, date, confidence, price, stop_loss, target
+                FROM signals
+                WHERE signal = 'BUY' AND exit_price IS NULL
+                ORDER BY date DESC
+            """)
+            rows = cur.fetchall()
+        conn.close()
+        positions = [dict(r) for r in rows]
+    except Exception:
+        return []
+
+    if not positions:
+        return []
+
+    # Fetch current prices for all open positions
+    tickers = list({p["ticker"] for p in positions})
+    current_prices = {}
+    try:
+        raw = yf.download(tickers, period="5d", progress=False, auto_adjust=True)
+        if len(tickers) == 1:
+            try:
+                current_prices[tickers[0]] = float(raw["Close"].dropna().iloc[-1])
+            except Exception:
+                pass
+        else:
+            for t in tickers:
+                try:
+                    current_prices[t] = float(raw["Close"][t].dropna().iloc[-1])
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    for p in positions:
+        cur = current_prices.get(p["ticker"])
+        p["current_price"] = cur
+        entry = p.get("price") or 0
+        if cur and entry:
+            p["unrealized_pnl"] = (cur - entry) / entry * 100
+        else:
+            p["unrealized_pnl"] = None
+
+    return positions
+
+
+def _check_stop_target_hits(open_positions: list[dict]) -> list[dict]:
+    """Auto-close any position that hit its stop loss or target. Returns list of hits."""
+    hits = []
+    today = datetime.now().strftime("%Y-%m-%d")
+    for p in open_positions:
+        cur = p.get("current_price")
+        if not cur:
+            continue
+        entry = p.get("price") or 0
+        stop   = _parse_price(p.get("stop_loss"))
+        target = _parse_price(p.get("target"))
+
+        hit_type = None
+        if stop and cur <= stop:
+            hit_type = "STOP"
+        elif target and cur >= target:
+            hit_type = "TARGET"
+
+        if hit_type:
+            pnl = (cur - entry) / entry * 100 if entry else 0
+            pnl_sign = "+" if pnl >= 0 else ""
+            label = "Target hit" if hit_type == "TARGET" else "Stop loss hit"
+            try:
+                conn = get_conn()
+                with conn.cursor() as db_cur:
+                    db_cur.execute("""
+                        UPDATE signals SET exit_price = %s, exit_date = %s
+                        WHERE id = %s AND exit_price IS NULL
+                    """, (cur, today, p["id"]))
+                conn.commit()
+                conn.close()
+            except Exception:
+                pass
+            # Log a SELL row so history shows why the position was closed
+            save_signal(p["ticker"], {
+                "signal":           "SELL",
+                "confidence_stars": p.get("confidence", 0),
+                "rationale":        f"{label} — {pnl_sign}{pnl:.2f}% from entry ${entry:.2f}",
+                "entry_zone":       None,
+                "stop_loss":        p.get("stop_loss"),
+                "target":           p.get("target"),
+            }, cur)
+            hits.append({**p, "hit_type": hit_type, "pnl": pnl})
+
+    return hits
+
+
+def fetch_price_data(ticker: str) -> pd.DataFrame:
+    """Fetch OHLCV history without Streamlit caching."""
+    stock = yf.Ticker(ticker)
+    df = stock.history(period=HISTORY_DAYS)
+    df.index = pd.to_datetime(df.index)
+    return df
+
+
+def run():
+    if ANTHROPIC_API_KEY == "your-api-key-here":
+        print("ERROR: Set your Anthropic API key in config.py before running.")
+        sys.exit(1)
+
+    today    = datetime.now().strftime("%Y-%m-%d")
+    universe = _get_sp500_tickers() if USE_SP500 else list(WATCHLIST)
+    source   = f"S&P 500 ({len(universe)} stocks)" if USE_SP500 else f"Watchlist ({len(universe)} stocks)"
+
+    # ── Market regime check ────────────────────────────────────────────────────
+    vix_level   = _get_vix()
+    buy_blocked = VIX_MAX is not None and vix_level is not None and vix_level > VIX_MAX
+    if vix_level is not None:
+        regime_label = f"⚠️  HIGH FEAR — BUY signals SUPPRESSED (VIX {vix_level:.1f} > {VIX_MAX})" if buy_blocked \
+                       else f"✅  Normal (VIX {vix_level:.1f} ≤ {VIX_MAX})"
+    else:
+        regime_label = "VIX unavailable — regime filter inactive"
+
+    print(f"\n{'='*60}")
+    print(f"  SwingTrader Daily Run — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"  Universe: {source}")
+    print(f"  Regime:   {regime_label}")
+    print(f"{'='*60}\n")
+
+    results          = {"BUY": [], "SELL": [], "NO TRADE": [], "ERROR": []}
+    notify_signals   = []   # collects signal dicts for BUY/SELL to notify at end
+    skipped          = 0
+
+    for ticker in universe:
+        # Skip if already processed today
+        if _already_signaled_today(ticker, today):
+            skipped += 1
+            continue
+
+        try:
+            df = fetch_price_data(ticker)
+            if df.empty:
+                print(f"  {ticker}: no data")
+                continue
+
+            ind  = compute_indicators(df)
+            fund = fetch_fundamentals(ticker)
+            sig  = get_signal(ticker, ind, fund)
+
+            signal = sig.get("signal", "ERROR")
+            conf   = sig.get("confidence_stars", 0)
+            price  = ind["latest_close"]
+
+            # Suppress BUY signals when VIX is elevated
+            if signal == "BUY" and buy_blocked:
+                signal = "NO TRADE"
+                sig["signal"] = "NO TRADE"
+
+            if signal in ("BUY", "SELL"):
+                save_signal(ticker, sig, price)
+                signal_dict = {
+                    "ticker":     ticker,
+                    "signal":     signal,
+                    "confidence": conf,
+                    "price":      price,
+                    "entry_zone": sig.get("entry_zone"),
+                    "stop_loss":  sig.get("stop_loss"),
+                    "target":     sig.get("target"),
+                    "rationale":  sig.get("rationale"),
+                }
+                notify_signals.append(signal_dict)
+                # Only push immediate alert for 4★/5★ BUY signals
+                if signal == "BUY" and conf >= 4:
+                    send_telegram([signal_dict])
+
+            results[signal if signal in results else "ERROR"].append(ticker)
+
+            stars = "★" * conf + "☆" * (5 - conf)
+            print(f"  {ticker:<6}  {signal:<8}  {stars}  ${price:.2f}")
+            if sig.get("rationale"):
+                print(f"         {sig['rationale'][:90]}")
+
+            # Brief pause to stay within API rate limits
+            time.sleep(0.5)
+
+        except Exception as e:
+            print(f"  {ticker}: ERROR — {e}")
+            results["ERROR"].append(ticker)
+
+    print(f"\n{'─'*60}")
+    print(f"  Universe : {source}")
+    print(f"  Skipped  : {skipped} (already run today)")
+    print(f"  BUY      ({len(results['BUY'])}): {', '.join(results['BUY']) or '—'}")
+    print(f"  SELL     ({len(results['SELL'])}): {', '.join(results['SELL']) or '—'}")
+    print(f"  ERRORS   ({len(results['ERROR'])}): {', '.join(results['ERROR']) or '—'}")
+    print(f"{'='*60}\n")
+
+    # Check stop/target hits on open positions before sending summary
+    open_positions = _get_open_positions()
+    hits = _check_stop_target_hits(open_positions)
+    if hits:
+        send_exit_alert(hits)
+        # Refresh positions list after auto-closing hits
+        open_positions = _get_open_positions()
+
+    # Daily summary email — always sends (signals or not)
+    perf = get_performance_stats()
+    send_daily_summary(notify_signals, results, source, skipped, open_positions, perf,
+                       vix_level=vix_level, vix_max=VIX_MAX)
+    send_push(notify_signals)
+
+
+if __name__ == "__main__":
+    run()
