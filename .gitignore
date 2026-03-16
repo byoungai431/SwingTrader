@@ -21,5 +21,8 @@ backtest results/
 # One-time migration scripts
 migrate_to_supabase.py
 
+# Claude Code local config
+.claude/
+
 # OS
 .DS_Store
