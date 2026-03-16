@@ -1,7 +1,8 @@
 import json
 import math
 import os
-import sqlite3
+import psycopg2
+import psycopg2.extras
 import subprocess
 import sys
 import yfinance as yf
@@ -14,7 +15,7 @@ from indicators import compute_indicators
 from fundamentals import fetch_fundamentals
 from history import (save_signal, get_history, dismiss_signal,
                       enter_position, get_my_open_positions,
-                      get_my_position_history, close_my_position)
+                      get_my_position_history, close_my_position, get_conn)
 from config import WATCHLIST, ANTHROPIC_API_KEY
 
 _WATCHLIST_FILE = os.path.join(os.path.dirname(__file__), "watchlist.json")
@@ -968,8 +969,6 @@ def _render_signal_cards(rows, current_prices):
 
 
 def show_recommended_view():
-    _DB_PATH = os.path.join(os.path.dirname(__file__), "data", "signals.db")
-
     st.markdown(
         '<div style="text-align:center;padding:30px 0 16px 0;">'
         '<div class="anim-shimmer" style="font-size:38px;font-weight:900;letter-spacing:0.06em;">⭐ Recommended</div>'
@@ -984,16 +983,17 @@ def show_recommended_view():
     # ── Tab 1: Open 4★/5★ signals ────────────────────────────────────────────
     with tab_open:
         try:
-            conn = sqlite3.connect(_DB_PATH)
-            conn.row_factory = sqlite3.Row
-            open_rows = conn.execute("""
-                SELECT id, ticker, date, signal, confidence,
-                       entry_zone, stop_loss, target, price, rationale
-                FROM signals
-                WHERE exit_date IS NULL AND signal = 'BUY' AND confidence >= 4
-                  AND dismissed_at IS NULL
-                ORDER BY confidence DESC, date DESC
-            """).fetchall()
+            conn = get_conn()
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT id, ticker, date, signal, confidence,
+                           entry_zone, stop_loss, target, price, rationale
+                    FROM signals
+                    WHERE exit_date IS NULL AND signal = 'BUY' AND confidence >= 4
+                      AND dismissed_at IS NULL
+                    ORDER BY confidence DESC, date DESC
+                """)
+                open_rows = cur.fetchall()
             conn.close()
         except Exception as e:
             st.error(f"Could not read signals database: {e}")
@@ -1033,19 +1033,20 @@ def show_recommended_view():
     # ── Tab 2: Signal Log (all 4★/5★, entered or passed) ─────────────────────
     with tab_history:
         try:
-            conn = sqlite3.connect(_DB_PATH)
-            conn.row_factory = sqlite3.Row
-            hist_rows = conn.execute("""
-                SELECT s.id, s.ticker, s.date, s.signal, s.confidence, s.price,
-                       s.exit_price, s.exit_date, s.stop_loss, s.target, s.rationale,
-                       s.dismissed_at,
-                       p.id as position_id
-                FROM signals s
-                LEFT JOIN positions p ON p.signal_id = s.id
-                WHERE s.confidence >= 4
-                  AND s.signal = 'BUY'
-                ORDER BY s.date DESC
-            """).fetchall()
+            conn = get_conn()
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT s.id, s.ticker, s.date, s.signal, s.confidence, s.price,
+                           s.exit_price, s.exit_date, s.stop_loss, s.target, s.rationale,
+                           s.dismissed_at,
+                           p.id as position_id
+                    FROM signals s
+                    LEFT JOIN positions p ON p.signal_id = s.id
+                    WHERE s.confidence >= 4
+                      AND s.signal = 'BUY'
+                    ORDER BY s.date DESC
+                """)
+                hist_rows = cur.fetchall()
             conn.close()
         except Exception as e:
             st.error(f"Could not read trade history: {e}")
