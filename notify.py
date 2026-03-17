@@ -417,8 +417,12 @@ def send_exit_alert(hits: list[dict]) -> bool:
     lines = [f"🔔 <b>POSITION CLOSED</b>", f"<i>{date}</i>", ""]
 
     for h in hits:
-        icon     = "🎯" if h["hit_type"] == "TARGET" else "🛑"
-        label    = "Target hit" if h["hit_type"] == "TARGET" else "Stop hit"
+        if h["hit_type"] == "TARGET":
+            icon, label = "🎯", "Target hit"
+        elif h["hit_type"] == "MANUAL":
+            icon, label = "🤚", "Manually closed (model still tracking)"
+        else:
+            icon, label = "🛑", "Stop hit"
         pnl      = h.get("pnl", 0)
         pnl_sign = "+" if pnl >= 0 else ""
         cur      = h.get("current_price", 0) or 0

@@ -1370,7 +1370,7 @@ def show_positions_view(user_id=""):
                         hit = close_my_position(p["id"], close_price_input, user_id=user_id)
                         if hit:
                             send_exit_alert([hit])
-                        st.toast(f"✅ {p['ticker']} closed at ${close_price_input:.2f}")
+                        st.toast(f"✅ {p['ticker']} manually closed at ${close_price_input:.2f} — model still tracking")
                         st.rerun()
                 st.markdown('<div style="margin-bottom:14px;"></div>', unsafe_allow_html=True)
 
