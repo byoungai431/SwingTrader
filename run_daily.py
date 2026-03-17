@@ -252,6 +252,23 @@ def run():
                 signal = "NO TRADE"
                 sig["signal"] = "NO TRADE"
 
+            # SELL signals only apply to open BUY positions — skip if none exists
+            if signal == "SELL":
+                try:
+                    conn = get_conn()
+                    with conn.cursor() as _c:
+                        _c.execute(
+                            "SELECT id FROM signals WHERE ticker=%s AND signal='BUY' AND exit_price IS NULL LIMIT 1",
+                            (ticker,)
+                        )
+                        has_open_buy = _c.fetchone() is not None
+                    conn.close()
+                except Exception:
+                    has_open_buy = False
+                if not has_open_buy:
+                    signal = "NO TRADE"
+                    sig["signal"] = "NO TRADE"
+
             if signal in ("BUY", "SELL"):
                 save_signal(ticker, sig, price)
                 signal_dict = {

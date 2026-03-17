@@ -1767,6 +1767,11 @@ if run or auto_run or selected_tickers != cached_tickers:
         else:
             from signal_engine import get_signal
             sig = get_signal(ticker, ind, fund)
+            # SELL signals only apply to open BUY positions — suppress if none exists
+            if sig["signal"] == "SELL":
+                open_buys = [p for p in get_my_open_positions(user_id) if p["ticker"] == ticker]
+                if not open_buys:
+                    sig["signal"] = "NO TRADE"
             if sig["signal"] in ("BUY", "SELL"):
                 save_signal(ticker, sig, ind["latest_close"])
         results.append({"ticker": ticker, "ind": ind, "sig": sig, "df": df, "fund": fund})
