@@ -15,26 +15,29 @@ from indicators import compute_indicators
 from fundamentals import fetch_fundamentals
 from history import (save_signal, get_history, dismiss_signal,
                       enter_position, get_my_open_positions,
-                      get_my_position_history, close_my_position, get_conn)
+                      get_my_position_history, close_my_position, get_conn,
+                      get_watchlist, save_watchlist)
 from config import WATCHLIST, ANTHROPIC_API_KEY
 
-_WATCHLIST_FILE = os.path.join(os.path.dirname(__file__), "watchlist.json")
-
-def _load_watchlist():
-    if os.path.exists(_WATCHLIST_FILE):
-        try:
-            data = json.loads(open(_WATCHLIST_FILE).read())
-            if isinstance(data, list):
-                return data
-        except Exception:
-            pass
-    return list(WATCHLIST)
-
-def _save_watchlist(wl):
-    with open(_WATCHLIST_FILE, "w") as f:
-        json.dump(wl, f)
-
 st.set_page_config(page_title="To The Moon", layout="wide", page_icon="🚀")
+
+# ── Auth gate ───────────────────────────────────────────────────────────────────
+if not st.experimental_user.is_logged_in:
+    st.markdown(
+        '<div style="display:flex;flex-direction:column;align-items:center;'
+        'justify-content:center;height:80vh;gap:24px;">'
+        '<div style="font-size:56px;">🚀</div>'
+        '<div style="font-size:32px;font-weight:900;letter-spacing:0.06em;color:#c0c0ff;">To The Moon</div>'
+        '<div style="font-size:14px;color:#8888bb;">Sign in to access your signals and positions.</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    col1, col2, col3 = st.columns([1, 1, 1])
+    with col2:
+        st.button("Sign in with Google", on_click=st.login, args=("google",), use_container_width=True)
+    st.stop()
+
+user_id: str = st.experimental_user.email or st.experimental_user.name or "unknown"
 
 DEMO_API_KEY = "your-api-key-here"
 def is_demo_mode(): return ANTHROPIC_API_KEY == DEMO_API_KEY
@@ -47,8 +50,9 @@ if "show_positions" not in st.session_state:
     st.session_state.show_positions = False
 if "auto_run" not in st.session_state:
     st.session_state.auto_run = False
-if "watchlist" not in st.session_state:
-    st.session_state.watchlist = _load_watchlist()
+if "watchlist" not in st.session_state or st.session_state.get("_wl_user") != user_id:
+    st.session_state.watchlist = get_watchlist(user_id) or list(WATCHLIST)
+    st.session_state._wl_user  = user_id
 def badge(label, color): return f'<span class="badge badge-{color}">{label}</span>'
 def stars(n): return "★" * int(n) + "☆" * (5 - int(n))
 
@@ -839,7 +843,7 @@ def mock_signal(ticker):
 
 
 # ── Recommended view ────────────────────────────────────────────────────────
-def _render_signal_cards(rows, current_prices):
+def _render_signal_cards(rows, current_prices, user_id=""):
     """Render open-signal cards for a list of DB rows."""
     five_star = [r for r in rows if int(r["confidence"]) == 5]
     four_star  = [r for r in rows if int(r["confidence"]) == 4]
@@ -938,7 +942,7 @@ def _render_signal_cards(rows, current_prices):
                 + f'</div>',
                 unsafe_allow_html=True
             )
-            btn_c1, btn_c2, btn_c3 = st.columns([2, 1, 1])
+            btn_c1, btn_c2 = st.columns([2, 1])
             with btn_c1:
                 if st.button("🔭  See Analysis", key=f"view_open_{r['ticker']}_{r['date']}", use_container_width=True):
                     st.session_state.selected_ticker = r["ticker"]
@@ -950,7 +954,7 @@ def _render_signal_cards(rows, current_prices):
             with btn_c2:
                 _already_in = any(
                     p["ticker"] == r["ticker"] and str(p.get("signal_id")) == str(r["id"])
-                    for p in (get_my_open_positions() or [])
+                    for p in (get_my_open_positions(user_id) or [])
                 )
                 if _already_in:
                     st.button("✅ In Positions", key=f"in_pos_{r['ticker']}_{r['date']}", use_container_width=True, disabled=True)
@@ -964,17 +968,14 @@ def _render_signal_cards(rows, current_prices):
                             confidence=int(r["confidence"]),
                             stop_loss=r.get("stop_loss"),
                             target=r.get("target"),
+                            user_id=user_id,
                         )
                         st.toast(f"✅ {r['ticker']} added to My Positions at ${_cur_price:.2f}")
                         st.rerun()
-            with btn_c3:
-                if st.button("👁  Confirm Viewed", key=f"dismiss_{r['id']}", use_container_width=True):
-                    dismiss_signal(r["id"])
-                    st.rerun()
             st.markdown('<div style="margin-bottom:14px;"></div>', unsafe_allow_html=True)
 
 
-def show_recommended_view():
+def show_recommended_view(user_id=""):
     st.markdown(
         '<div style="text-align:center;padding:30px 0 16px 0;">'
         '<div class="anim-shimmer" style="font-size:38px;font-weight:900;letter-spacing:0.06em;">⭐ Recommended</div>'
@@ -996,9 +997,12 @@ def show_recommended_view():
                            entry_zone, stop_loss, target, price, rationale
                     FROM signals
                     WHERE exit_date IS NULL AND signal = 'BUY' AND confidence >= 4
-                      AND dismissed_at IS NULL
+                      AND NOT EXISTS (
+                          SELECT 1 FROM signal_dismissals sd
+                          WHERE sd.signal_id = signals.id AND sd.user_id = %s
+                      )
                     ORDER BY confidence DESC, date DESC
-                """)
+                """, (user_id,))
                 open_rows = cur.fetchall()
             conn.close()
         except Exception as e:
@@ -1034,7 +1038,7 @@ def show_recommended_view():
                                 pass
                 except Exception:
                     pass
-            _render_signal_cards(open_rows, current_prices)
+            _render_signal_cards(open_rows, current_prices, user_id)
 
     # ── Tab 2: Signal Log (all 4★/5★, entered or passed) ─────────────────────
     with tab_history:
@@ -1044,14 +1048,13 @@ def show_recommended_view():
                 cur.execute("""
                     SELECT s.id, s.ticker, s.date, s.signal, s.confidence, s.price,
                            s.exit_price, s.exit_date, s.stop_loss, s.target, s.rationale,
-                           s.dismissed_at,
                            p.id as position_id
                     FROM signals s
-                    LEFT JOIN positions p ON p.signal_id = s.id
+                    LEFT JOIN positions p ON p.signal_id = s.id AND p.user_id = %s
                     WHERE s.confidence >= 4
                       AND s.signal = 'BUY'
                     ORDER BY s.date DESC
-                """)
+                """, (user_id,))
                 hist_rows = cur.fetchall()
             conn.close()
         except Exception as e:
@@ -1101,7 +1104,10 @@ def show_recommended_view():
             ent_wr_color   = "#39d98a" if entered_wr  >= 50 else "#ff6b6b"
 
             st.markdown(
-                f'<div style="display:flex;gap:16px;flex-wrap:wrap;margin:16px 0 8px 0;">'
+                f'<div style="font-size:11px;color:#a090ff;letter-spacing:0.18em;text-transform:uppercase;'
+                f'font-weight:700;margin:16px 0 6px 2px;padding:4px 10px;background:rgba(160,144,255,0.08);'
+                f'border-left:3px solid #a090ff;border-radius:0 4px 4px 0;">📊 Overall Recommended</div>'
+                f'<div style="display:flex;gap:16px;flex-wrap:wrap;margin:0 0 8px 0;">'
                 f'<div class="fund-card" style="flex:1;min-width:80px;">'
                 f'<div class="fund-card-label">Signals</div>'
                 f'<div class="fund-card-value">{len(hist_rows)}</div>'
@@ -1240,7 +1246,7 @@ def show_recommended_view():
 
 
 # ── My Positions view ─────────────────────────────────────────────────────────
-def show_positions_view():
+def show_positions_view(user_id=""):
     import yfinance as yf
 
     st.markdown(
@@ -1256,7 +1262,7 @@ def show_positions_view():
 
     # ── Tab 1: Open positions ─────────────────────────────────────────────────
     with tab_open:
-        open_pos = get_my_open_positions()
+        open_pos = get_my_open_positions(user_id)
 
         if not open_pos:
             st.markdown(
@@ -1350,14 +1356,14 @@ def show_positions_view():
                     )
                 with col_close_btn:
                     if st.button("🔴  Close Position", key=f"close_{p['id']}", use_container_width=True):
-                        close_my_position(p["id"], close_price_input)
+                        close_my_position(p["id"], close_price_input, user_id=user_id)
                         st.toast(f"✅ {p['ticker']} closed at ${close_price_input:.2f}")
                         st.rerun()
                 st.markdown('<div style="margin-bottom:14px;"></div>', unsafe_allow_html=True)
 
     # ── Tab 2: Closed trades ──────────────────────────────────────────────────
     with tab_hist:
-        hist = get_my_position_history()
+        hist = get_my_position_history(user_id)
 
         if not hist:
             st.markdown(
@@ -1450,6 +1456,16 @@ st.sidebar.markdown(
     unsafe_allow_html=True
 )
 
+st.sidebar.divider()
+
+# ── User info + logout ─────────────────────────────────────────────────────────
+_display_name = st.experimental_user.name or st.experimental_user.email or "User"
+st.sidebar.markdown(
+    f'<div style="font-size:11px;color:#5555aa;text-align:center;padding:2px 0 6px 0;">'
+    f'Signed in as<br><span style="color:#c0c0ff;font-weight:600;">{_display_name}</span></div>',
+    unsafe_allow_html=True,
+)
+st.sidebar.button("Sign out", on_click=st.logout, use_container_width=True)
 st.sidebar.divider()
 
 if is_demo_mode():
@@ -1605,7 +1621,7 @@ with st.sidebar.expander("⚙️  Manage Watchlist", expanded=False):
             t = new_ticker.strip().upper()
             if t and t not in st.session_state.watchlist:
                 st.session_state.watchlist.append(t)
-                _save_watchlist(st.session_state.watchlist)
+                save_watchlist(user_id, st.session_state.watchlist)
                 st.rerun()
 
     # ── Current watchlist with multi-select remove ──
@@ -1638,7 +1654,7 @@ with st.sidebar.expander("⚙️  Manage Watchlist", expanded=False):
             for t in st.session_state.wl_selected:
                 if t in st.session_state.watchlist:
                     st.session_state.watchlist.remove(t)
-            _save_watchlist(st.session_state.watchlist)
+            save_watchlist(user_id, st.session_state.watchlist)
             st.session_state.wl_selected = set()
             st.rerun()
 
@@ -1701,11 +1717,11 @@ with _mc3:
             st.rerun()
 
 if st.session_state.show_recommended:
-    show_recommended_view()
+    show_recommended_view(user_id)
     st.stop()
 
 if st.session_state.show_positions:
-    show_positions_view()
+    show_positions_view(user_id)
     st.stop()
 
 auto_run = st.session_state.auto_run
@@ -2033,7 +2049,7 @@ for item in results:
             sel_pat = patterns[sel_idx]
             # Description + measured move info bar
             mm      = sel_pat.get("measured_move")
-            mm_str  = f" &nbsp;·&nbsp; Target <b>\${mm}</b>" if mm else ""
+            mm_str  = f" &nbsp;·&nbsp; Target <b>${mm}</b>" if mm else ""
             pat_name = sel_pat["pattern"]
             if sel_pat.get("bearish"):
                 conf_str = (f'<span style="color:#f87171;">✦ {pat_name} Confirmed breakdown</span>'
@@ -2202,7 +2218,7 @@ for item in results:
                 y=[p["neckline"], p["neckline"]],
                 mode="lines+text",
                 line=dict(color=p_color, width=2, dash=p_dash),
-                text=["", f"Neckline \${p['neckline']}"],
+                text=["", f"Neckline ${p['neckline']}"],
                 textposition="top right",
                 textfont=dict(size=10, color=p_color),
                 showlegend=False, hoverinfo="skip",
@@ -2213,7 +2229,7 @@ for item in results:
                 y=[p["target_y"]],
                 mode="markers+text",
                 marker=dict(symbol="diamond", size=10, color=t_color),
-                text=[f"Target \${p['target_y']}"],
+                text=[f"Target ${p['target_y']}"],
                 textposition="top right",
                 textfont=dict(size=10, color=t_color),
                 showlegend=False, hoverinfo="skip",
@@ -2254,7 +2270,7 @@ for item in results:
                 y=[p["neckline"], p["neckline"]],
                 mode="lines+text",
                 line=dict(color=p_color, width=2, dash=p_dash),
-                text=["", f"Neckline \${p['neckline']}"],
+                text=["", f"Neckline ${p['neckline']}"],
                 textposition="top right",
                 textfont=dict(size=10, color=p_color),
                 showlegend=False, hoverinfo="skip",
@@ -2265,7 +2281,7 @@ for item in results:
                 y=[p["target_y"]],
                 mode="markers+text",
                 marker=dict(symbol="diamond", size=10, color=t_color),
-                text=[f"Target \${p['target_y']}"],
+                text=[f"Target ${p['target_y']}"],
                 textposition="top right",
                 textfont=dict(size=10, color=t_color),
                 showlegend=False, hoverinfo="skip",
@@ -2306,7 +2322,7 @@ for item in results:
                 y=[p["neckline"], p["neckline"]],
                 mode="lines+text",
                 line=dict(color=p_color, width=2, dash=p_dash),
-                text=["", f"Breakout \${p['neckline']}"],
+                text=["", f"Breakout ${p['neckline']}"],
                 textposition="top right",
                 textfont=dict(size=10, color=p_color),
                 showlegend=False, hoverinfo="skip",
@@ -2317,7 +2333,7 @@ for item in results:
                 y=[p["target_y"]],
                 mode="markers+text",
                 marker=dict(symbol="diamond", size=10, color=t_color),
-                text=[f"Target \${p['target_y']}"],
+                text=[f"Target ${p['target_y']}"],
                 textposition="top right",
                 textfont=dict(size=10, color=t_color),
                 showlegend=False, hoverinfo="skip",
@@ -2356,7 +2372,7 @@ for item in results:
                 y=[p["neckline"], p["neckline"]],
                 mode="lines+text",
                 line=dict(color=p_color, width=2, dash=p_dash),
-                text=["", f"Neckline \${p['neckline']}"],
+                text=["", f"Neckline ${p['neckline']}"],
                 textposition="bottom right",
                 textfont=dict(size=10, color=p_color),
                 showlegend=False, hoverinfo="skip",
@@ -2366,7 +2382,7 @@ for item in results:
                 y=[p["target_y"]],
                 mode="markers+text",
                 marker=dict(symbol="diamond", size=10, color=t_color),
-                text=[f"Target \${p['target_y']}"],
+                text=[f"Target ${p['target_y']}"],
                 textposition="bottom right",
                 textfont=dict(size=10, color=t_color),
                 showlegend=False, hoverinfo="skip",
@@ -2405,7 +2421,7 @@ for item in results:
                 y=[p["neckline"], p["neckline"]],
                 mode="lines+text",
                 line=dict(color=p_color, width=2, dash=p_dash),
-                text=["", f"Neckline \${p['neckline']}"],
+                text=["", f"Neckline ${p['neckline']}"],
                 textposition="bottom right",
                 textfont=dict(size=10, color=p_color),
                 showlegend=False, hoverinfo="skip",
@@ -2415,7 +2431,7 @@ for item in results:
                 y=[p["target_y"]],
                 mode="markers+text",
                 marker=dict(symbol="diamond", size=10, color=t_color),
-                text=[f"Target \${p['target_y']}"],
+                text=[f"Target ${p['target_y']}"],
                 textposition="bottom right",
                 textfont=dict(size=10, color=t_color),
                 showlegend=False, hoverinfo="skip",
@@ -2508,7 +2524,7 @@ for item in results:
             color     = sig_colors.get(h["signal"], "#c0c0ff")
             sig_label = h["signal"]
             conf_str  = stars(h["confidence"] or 0)
-            price_str = f'\${h["price"]:.2f}' if h.get("price") else "—"
+            price_str = f'${h["price"]:.2f}' if h.get("price") else "—"
 
             # P&L summary for closed trades
             pnl_str = ""

@@ -55,6 +55,23 @@ def init_db():
                     created_at     TEXT    DEFAULT NOW()::text
                 )
             """)
+            # Per-user columns / tables (safe to run on every startup)
+            cur.execute("ALTER TABLE positions ADD COLUMN IF NOT EXISTS user_id TEXT")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS signal_dismissals (
+                    signal_id    INTEGER NOT NULL,
+                    user_id      TEXT    NOT NULL,
+                    dismissed_at TEXT    NOT NULL,
+                    PRIMARY KEY (signal_id, user_id)
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS watchlists (
+                    user_id TEXT NOT NULL,
+                    ticker  TEXT NOT NULL,
+                    PRIMARY KEY (user_id, ticker)
+                )
+            """)
         conn.commit()
     finally:
         conn.close()
@@ -168,16 +185,17 @@ def get_history(ticker: str, limit: int = 8) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def dismiss_signal(signal_id: int):
-    """Mark a signal as viewed/dismissed so it hides from the Recommended list."""
+def dismiss_signal(signal_id: int, user_id: str):
+    """Hide a signal from the Recommended list for this user only."""
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                UPDATE signals SET dismissed_at = %s
-                WHERE id = %s
-            """, (now, signal_id))
+                INSERT INTO signal_dismissals (signal_id, user_id, dismissed_at)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (signal_id, user_id) DO NOTHING
+            """, (signal_id, user_id, now))
         conn.commit()
     finally:
         conn.close()
@@ -187,7 +205,7 @@ def dismiss_signal(signal_id: int):
 
 def enter_position(signal_id: int | None, ticker: str, entry_price: float,
                    confidence: int, stop_loss: str | None, target: str | None,
-                   notes: str | None = None) -> int:
+                   user_id: str = "", notes: str | None = None) -> int:
     """Record a trade the user manually entered. Returns the new position id."""
     init_db()
     today = datetime.now().strftime("%Y-%m-%d")
@@ -197,11 +215,11 @@ def enter_position(signal_id: int | None, ticker: str, entry_price: float,
             cur.execute("""
                 INSERT INTO positions
                     (signal_id, ticker, entry_date, entry_price, confidence,
-                     stop_loss, target, notes)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                     stop_loss, target, notes, user_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (signal_id, ticker, today, entry_price, confidence,
-                  stop_loss, target, notes))
+                  stop_loss, target, notes, user_id))
             new_id = cur.fetchone()[0]
         conn.commit()
         return new_id
@@ -209,7 +227,7 @@ def enter_position(signal_id: int | None, ticker: str, entry_price: float,
         conn.close()
 
 
-def get_my_open_positions() -> list[dict]:
+def get_my_open_positions(user_id: str = "") -> list[dict]:
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -217,16 +235,16 @@ def get_my_open_positions() -> list[dict]:
                 SELECT id, signal_id, ticker, entry_date, entry_price,
                        confidence, stop_loss, target, notes
                 FROM positions
-                WHERE exit_date IS NULL
+                WHERE exit_date IS NULL AND user_id = %s
                 ORDER BY entry_date DESC
-            """)
+            """, (user_id,))
             rows = cur.fetchall()
     finally:
         conn.close()
     return [dict(r) for r in rows]
 
 
-def get_my_position_history(limit: int = 50) -> list[dict]:
+def get_my_position_history(user_id: str = "", limit: int = 50) -> list[dict]:
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -234,17 +252,17 @@ def get_my_position_history(limit: int = 50) -> list[dict]:
                 SELECT id, ticker, entry_date, entry_price, confidence,
                        stop_loss, target, exit_price, exit_date, exit_reason, notes
                 FROM positions
-                WHERE exit_date IS NOT NULL
+                WHERE exit_date IS NOT NULL AND user_id = %s
                 ORDER BY exit_date DESC
                 LIMIT %s
-            """, (limit,))
+            """, (user_id, limit))
             rows = cur.fetchall()
     finally:
         conn.close()
     return [dict(r) for r in rows]
 
 
-def close_my_position(position_id: int, exit_price: float, exit_reason: str = "Manual"):
+def close_my_position(position_id: int, exit_price: float, user_id: str = "", exit_reason: str = "Manual"):
     today = datetime.now().strftime("%Y-%m-%d")
     conn = get_conn()
     try:
@@ -252,8 +270,42 @@ def close_my_position(position_id: int, exit_price: float, exit_reason: str = "M
             cur.execute("""
                 UPDATE positions
                 SET exit_price = %s, exit_date = %s, exit_reason = %s
-                WHERE id = %s
-            """, (exit_price, today, exit_reason, position_id))
+                WHERE id = %s AND user_id = %s
+            """, (exit_price, today, exit_reason, position_id, user_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_watchlist(user_id: str) -> list[str]:
+    """Return the tickers on this user's watchlist, in insertion order."""
+    init_db()
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT ticker FROM watchlists
+                WHERE user_id = %s
+                ORDER BY ctid
+            """, (user_id,))
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    return [r[0] for r in rows]
+
+
+def save_watchlist(user_id: str, tickers: list[str]):
+    """Replace the user's watchlist with the given ticker list."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM watchlists WHERE user_id = %s", (user_id,))
+            if tickers:
+                psycopg2.extras.execute_values(
+                    cur,
+                    "INSERT INTO watchlists (user_id, ticker) VALUES %s ON CONFLICT DO NOTHING",
+                    [(user_id, t) for t in tickers],
+                )
         conn.commit()
     finally:
         conn.close()

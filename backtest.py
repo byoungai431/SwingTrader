@@ -62,6 +62,7 @@ RANDOM_SEED      = 42      # fixed seed for reproducibility
 
 # ── Entry Filters (new — toggle each independently to measure impact) ───────────
 RSI_ENTRY_MAX       = 40    # RSI must be below this at entry (baseline was 40)
+VOL_SPIKE_MIN       = 1.5   # Volume spike threshold
 WEEKLY_TREND_FILTER = False # Only enter if price > 100-day MA (proxy for weekly trend up)
 RS_SPY_FILTER       = False # Only enter if stock's 5-day return > SPY's 5-day return
 EARNINGS_FILTER     = False # Skip signal if earnings date is within 5 calendar days of entry
@@ -172,7 +173,7 @@ def build_indicator_df(raw_df):
 #   3 conditions fired → 3★  (minimum viable trade)
 #   4 conditions fired → 4★  (all signals aligned)
 #   RSI bonus (applied after entry gate, does not affect entry logic):
-#     RSI dipped below 40 in last 3 bars → +1★ (max tier: 4★)
+#     RSI dipped below 30 in last 3 bars → +1★ (max tier: 4★)
 # SELL conditions (only when price < MA200 — bear regime, used to EXIT longs only):
 #   1. Overbought exit : RSI > 65
 #   2. MACD reversal   : histogram crossing below 0 (cur < 0 < prev)
@@ -195,7 +196,7 @@ def get_signal(df, i):
         r["rsi"] < RSI_ENTRY_MAX,                                             # oversold/pullback dip
         r["macd_hist"] > 0 and p["macd_hist"] <= 0,                          # momentum turned positive
         r["Close"] > r["ma50"] and p["Close"] <= p["ma50"] * 1.01,           # MA50 pullback bounce: just reclaimed from below
-        not pd.isna(r.get("rel_vol", float("nan"))) and r["rel_vol"] >= 1.5, # volume spike (participation)
+        not pd.isna(r.get("rel_vol", float("nan"))) and r["rel_vol"] >= VOL_SPIKE_MIN, # volume spike (participation)
     ]
     sell_conds = [
         r["rsi"] > 65,
@@ -242,7 +243,7 @@ def strategy_labels(df, i, direction):
             labels.append("MACD Momentum Cross")
         if r["Close"] > r["ma50"] and p["Close"] <= p["ma50"] * 1.01:
             labels.append("MA50 Bounce")
-        if not pd.isna(r.get("rel_vol", float("nan"))) and r["rel_vol"] >= 1.5:
+        if not pd.isna(r.get("rel_vol", float("nan"))) and r["rel_vol"] >= VOL_SPIKE_MIN:
             labels.append(f"Volume Spike ({r['rel_vol']:.1f}x)")
         return ", ".join(labels)
     else:
@@ -269,7 +270,7 @@ def confidence_count(df, i):
         count += 1
     if r["Close"] > r["ma50"] and p["Close"] <= p["ma50"] * 1.01:
         count += 1
-    if not pd.isna(r.get("rel_vol", float("nan"))) and r["rel_vol"] >= 1.5:
+    if not pd.isna(r.get("rel_vol", float("nan"))) and r["rel_vol"] >= VOL_SPIKE_MIN:
         count += 1
     # RSI oversold bonus: +1★ if RSI dipped below 40 in last 3 bars (deep oversold recovery)
     if any(df["rsi"].iloc[max(0, i-2):i+1] < 40):
