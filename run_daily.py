@@ -57,13 +57,24 @@ def _get_vix() -> float | None:
         return None
 
 
-def _already_signaled_today(ticker: str, today: str) -> bool:
-    """Return True if a BUY/SELL signal was already saved for this ticker today."""
+def _in_cooldown(ticker: str, today: str, days: int = 5) -> bool:
+    """Return True if a BUY signal exists for this ticker within the last `days` calendar days.
+
+    Prevents re-entering a position that was recently signaled.
+    Also returns True if the ticker was already processed today (any signal).
+    """
     try:
+        from datetime import datetime, timedelta
+        cutoff = (datetime.strptime(today, "%Y-%m-%d") - timedelta(days=days)).strftime("%Y-%m-%d")
         conn = get_conn()
         with conn.cursor() as cur:
+            # Block if already processed today (any signal) OR BUY within cooldown window
             cur.execute(
-                "SELECT id FROM signals WHERE ticker=%s AND date=%s", (ticker, today)
+                """SELECT id FROM signals WHERE ticker=%s AND (
+                       date = %s
+                       OR (signal='BUY' AND date >= %s)
+                   ) LIMIT 1""",
+                (ticker, today, cutoff)
             )
             row = cur.fetchone()
         conn.close()
@@ -223,7 +234,7 @@ def run():
 
     for ticker in universe:
         # Skip if already processed today
-        if _already_signaled_today(ticker, today):
+        if _in_cooldown(ticker, today):
             skipped += 1
             continue
 
