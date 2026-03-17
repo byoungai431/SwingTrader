@@ -1678,6 +1678,29 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+# ── Mobile nav bar ─────────────────────────────────────────────────────────────
+_mc1, _mc2, _mc3 = st.columns(3)
+with _mc1:
+    if st.button("⭐  Recommended", use_container_width=True, key="mob_rec"):
+        st.session_state.show_recommended = not st.session_state.show_recommended
+        st.session_state.show_positions = False
+        st.rerun()
+with _mc2:
+    if st.button("📈  Positions", use_container_width=True, key="mob_pos"):
+        st.session_state.show_positions = not st.session_state.show_positions
+        st.session_state.show_recommended = False
+        st.rerun()
+with _mc3:
+    _wl = st.session_state.watchlist
+    if _wl:
+        _mob_pick = st.selectbox("Stock", ["— Select —"] + _wl, label_visibility="collapsed", key="mob_ticker_sel")
+        if _mob_pick and _mob_pick != "— Select —" and _mob_pick != st.session_state.get("selected_ticker"):
+            st.session_state.selected_ticker = _mob_pick
+            st.session_state.analyzed = False
+            st.session_state.show_recommended = False
+            st.session_state.show_positions = False
+            st.rerun()
+
 if st.session_state.show_recommended:
     show_recommended_view()
     st.stop()
