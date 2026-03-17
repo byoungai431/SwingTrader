@@ -39,7 +39,7 @@ def _secret(key, fallback):
     except Exception:
         return fallback
 
-ANTHROPIC_API_KEY  = _secret("ANTHROPIC_API_KEY",  "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")
+ANTHROPIC_API_KEY  = _secret("ANTHROPIC_API_KEY",  "")
 
 # ── Notifications ─────────────────────────────────────────────────────────────
 
