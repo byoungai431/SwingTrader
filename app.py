@@ -18,6 +18,7 @@ from history import (save_signal, get_history, dismiss_signal,
                       get_my_position_history, close_my_position, get_conn,
                       get_watchlist, save_watchlist)
 from config import WATCHLIST, ANTHROPIC_API_KEY
+from notify import send_exit_alert
 
 st.set_page_config(page_title="To The Moon", layout="wide", page_icon="🚀")
 
@@ -1366,7 +1367,9 @@ def show_positions_view(user_id=""):
                     )
                 with col_close_btn:
                     if st.button("🔴  Close Position", key=f"close_{p['id']}", use_container_width=True):
-                        close_my_position(p["id"], close_price_input, user_id=user_id)
+                        hit = close_my_position(p["id"], close_price_input, user_id=user_id)
+                        if hit:
+                            send_exit_alert([hit])
                         st.toast(f"✅ {p['ticker']} closed at ${close_price_input:.2f}")
                         st.rerun()
                 st.markdown('<div style="margin-bottom:14px;"></div>', unsafe_allow_html=True)

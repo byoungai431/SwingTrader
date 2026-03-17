@@ -275,19 +275,58 @@ def get_my_position_history(user_id: str = "", limit: int = 50) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def close_my_position(position_id: int, exit_price: float, user_id: str = "", exit_reason: str = "Manual"):
+def close_my_position(position_id: int, exit_price: float, user_id: str = "", exit_reason: str = "Manual") -> dict | None:
+    """Close a position, close its linked BUY signal, and save a SELL signal.
+
+    Returns a hit dict suitable for send_exit_alert, or None if not found.
+    """
     today = datetime.now().strftime("%Y-%m-%d")
     conn = get_conn()
     try:
-        with conn.cursor() as cur:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT signal_id, ticker, entry_price, confidence, stop_loss, target
+                FROM positions WHERE id = %s AND user_id = %s
+            """, (position_id, user_id))
+            pos = cur.fetchone()
+            if not pos:
+                return None
+            pos = dict(pos)
+
             cur.execute("""
                 UPDATE positions
                 SET exit_price = %s, exit_date = %s, exit_reason = %s
                 WHERE id = %s AND user_id = %s
             """, (exit_price, today, exit_reason, position_id, user_id))
+
+            if pos.get("signal_id"):
+                cur.execute("""
+                    UPDATE signals SET exit_price = %s, exit_date = %s
+                    WHERE id = %s AND exit_price IS NULL
+                """, (exit_price, today, pos["signal_id"]))
         conn.commit()
     finally:
         conn.close()
+
+    entry = pos.get("entry_price") or 0
+    pnl   = (exit_price - entry) / entry * 100 if entry else 0
+    pnl_sign = "+" if pnl >= 0 else ""
+    save_signal(pos["ticker"], {
+        "signal":           "SELL",
+        "confidence_stars": pos.get("confidence", 0),
+        "rationale":        f"{exit_reason} exit — {pnl_sign}{pnl:.2f}% from entry ${entry:.2f}",
+        "entry_zone":       None,
+        "stop_loss":        pos.get("stop_loss"),
+        "target":           pos.get("target"),
+    }, exit_price)
+
+    return {
+        "ticker":        pos["ticker"],
+        "price":         entry,
+        "current_price": exit_price,
+        "hit_type":      "MANUAL",
+        "pnl":           pnl,
+    }
 
 
 def get_watchlist(user_id: str) -> list[str]:
