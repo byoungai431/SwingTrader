@@ -2,61 +2,72 @@ import requests
 import streamlit as st
 
 
-def _get_fmp_key() -> str:
+def _get_finnhub_key() -> str:
     try:
-        return st.secrets["FMP_API_KEY"]
+        return st.secrets["FINNHUB_API_KEY"]
     except Exception:
         return ""
 
 
-def _fetch_fmp(ticker: str, api_key: str) -> dict:
-    base = "https://financialmodelingprep.com/api/v3"
-    params = {"apikey": api_key}
+def _fetch_finnhub(ticker: str, api_key: str) -> dict:
+    params = {"symbol": ticker, "token": api_key}
     try:
-        r1 = requests.get(f"{base}/key-metrics-ttm/{ticker}", params=params, timeout=10)
-        metrics = r1.json()[0] if r1.ok and isinstance(r1.json(), list) and r1.json() else {}
+        r1 = requests.get("https://finnhub.io/api/v1/stock/metric",
+                          params={**params, "metric": "all"}, timeout=10)
+        metrics = r1.json().get("metric", {}) if r1.ok else {}
     except Exception:
         metrics = {}
     try:
-        r2 = requests.get(f"{base}/profile/{ticker}", params=params, timeout=10)
-        profile = r2.json()[0] if r2.ok and isinstance(r2.json(), list) and r2.json() else {}
+        r2 = requests.get("https://finnhub.io/api/v1/stock/profile2",
+                          params=params, timeout=10)
+        profile = r2.json() if r2.ok else {}
     except Exception:
         profile = {}
     try:
-        r3 = requests.get(f"{base}/cash-flow-statement/{ticker}", params={**params, "limit": 1}, timeout=10)
-        cf = r3.json()[0] if r3.ok and isinstance(r3.json(), list) and r3.json() else {}
+        r3 = requests.get("https://finnhub.io/api/v1/stock/financials-reported",
+                          params={**params, "freq": "annual"}, timeout=10)
+        reports = r3.json().get("data", []) if r3.ok else []
+        cf = reports[0].get("report", {}).get("cf", []) if reports else []
+        fcf = None
+        op_cf = next((x["value"] for x in cf if x.get("concept") == "NetCashProvidedByUsedInOperatingActivities"), None)
+        capex = next((x["value"] for x in cf if x.get("concept") == "PaymentsToAcquirePropertyPlantAndEquipment"), None)
+        if op_cf is not None and capex is not None:
+            fcf = op_cf - capex
     except Exception:
-        cf = {}
-    return {**metrics, **profile, **cf}
+        fcf = None
+
+    return {"metrics": metrics, "profile": profile, "fcf": fcf}
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_fundamentals(ticker: str) -> dict:
-    """Fetch key fundamental metrics via Financial Modeling Prep API."""
-    api_key = _get_fmp_key()
-    data = _fetch_fmp(ticker, api_key) if api_key else {}
+    """Fetch key fundamental metrics via Finnhub API."""
+    api_key = _get_finnhub_key()
+    data = _fetch_finnhub(ticker, api_key) if api_key else {"metrics": {}, "profile": {}, "fcf": None}
 
-    def safe(key, scale=1, decimals=2):
-        val = data.get(key)
-        if val is None or val == 0:
+    m = data["metrics"]
+    p = data["profile"]
+
+    def safe(val, scale=1, decimals=2):
+        if val is None:
             return None
         try:
             return round(float(val) * scale, decimals)
         except (TypeError, ValueError):
             return None
 
-    pe     = safe("peRatioTTM")
-    fwd_pe = safe("forwardPE") or safe("priceEarningsRatioTTM")
-    peg    = safe("pegRatioTTM")
-    roe    = safe("roeTTM", 100)          # decimal → percent
-    de     = safe("debtToEquityTTM")
-    fcf_b  = safe("freeCashFlow", 1e-9)   # raw dollars → $B
+    pe     = safe(m.get("peTTM"))
+    fwd_pe = safe(m.get("forwardPE")) or safe(m.get("peNormalizedAnnual"))
+    peg    = safe(m.get("pegRatio"))
+    roe    = safe(m.get("roeTTM"))        # already in percent
+    de     = safe(m.get("totalDebt/totalEquityAnnual"))
+    fcf_b  = safe(data["fcf"], 1e-9) if data["fcf"] else safe(m.get("freeCashFlowTTM"), 1e-9)
 
-    company_name        = data.get("companyName") or data.get("name") or ""
-    sector              = data.get("sector") or ""
-    industry            = data.get("industry") or ""
-    summary_raw         = data.get("description") or ""
-    sentences           = summary_raw.replace("  ", " ").split(". ")
+    company_name = p.get("name") or ""
+    sector       = p.get("finnhubIndustry") or ""
+    industry     = p.get("finnhubIndustry") or ""
+    summary_raw  = p.get("description") or ""  # not always available
+    sentences    = summary_raw.replace("  ", " ").split(". ")
     company_description = ". ".join(sentences[:2]).strip()
     if company_description and not company_description.endswith("."):
         company_description += "."
@@ -85,4 +96,4 @@ if __name__ == "__main__":
     import json, sys
     key = sys.argv[1] if len(sys.argv) > 1 else ""
     for t in ["AAPL", "MSFT", "TSLA", "COHR"]:
-        print(f"\n{t}:", json.dumps(_fetch_fmp(t, key), indent=2))
+        print(f"\n{t}:", json.dumps(_fetch_finnhub(t, key), indent=2))
