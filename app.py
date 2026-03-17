@@ -1576,6 +1576,7 @@ for _t in st.session_state.watchlist:
     if st.sidebar.button(_t, key=f"wl_btn_{_t}", use_container_width=True):
         st.session_state.selected_ticker = _t
         st.session_state.analyzed = False
+        st.session_state.auto_run = True
         st.session_state.show_recommended = False
         st.session_state.show_positions = False
         st.rerun()
@@ -1697,6 +1698,7 @@ with _mc3:
         if _mob_pick and _mob_pick != "— Select —" and _mob_pick != st.session_state.get("selected_ticker"):
             st.session_state.selected_ticker = _mob_pick
             st.session_state.analyzed = False
+            st.session_state.auto_run = True
             st.session_state.show_recommended = False
             st.session_state.show_positions = False
             st.rerun()
