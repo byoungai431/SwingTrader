@@ -22,8 +22,14 @@ from config import WATCHLIST, ANTHROPIC_API_KEY
 st.set_page_config(page_title="To The Moon", layout="wide", page_icon="🚀")
 
 # ── Auth gate ───────────────────────────────────────────────────────────────────
-_auth_enabled = hasattr(st.experimental_user, "is_logged_in")
-if _auth_enabled and not st.experimental_user.is_logged_in:
+try:
+    _st_user = getattr(st, "user", None) or getattr(st, "experimental_user", None)
+    _auth_enabled = _st_user is not None and hasattr(_st_user, "is_logged_in")
+except Exception:
+    _st_user = None
+    _auth_enabled = False
+
+if _auth_enabled and not _st_user.is_logged_in:
     st.markdown(
         '<div style="display:flex;flex-direction:column;align-items:center;'
         'justify-content:center;height:80vh;gap:24px;">'
@@ -38,8 +44,8 @@ if _auth_enabled and not st.experimental_user.is_logged_in:
         st.button("Sign in with Google", on_click=st.login, args=("google",), use_container_width=True)
     st.stop()
 
-if _auth_enabled:
-    user_id: str = st.experimental_user.email or st.experimental_user.name or "unknown"
+if _auth_enabled and _st_user is not None:
+    user_id: str = getattr(_st_user, "email", None) or getattr(_st_user, "name", None) or "unknown"
 else:
     user_id: str = "unknown"
 
