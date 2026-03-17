@@ -967,23 +967,54 @@ def _render_signal_cards(rows, current_prices, user_id=""):
                     p["ticker"] == r["ticker"] and str(p.get("signal_id")) == str(r["id"])
                     for p in (get_my_open_positions(user_id) or [])
                 )
+                _confirm_key = f"confirm_enter_{r['ticker']}_{r['date']}"
                 if _already_in:
                     st.button("✅ In Positions", key=f"in_pos_{r['ticker']}_{r['date']}", use_container_width=True, disabled=True)
+                elif st.session_state.get(_confirm_key):
+                    st.button("📈  Enter Position", key=f"enter_{r['ticker']}_{r['date']}", use_container_width=True, disabled=True)
                 else:
                     if st.button("📈  Enter Position", key=f"enter_{r['ticker']}_{r['date']}", use_container_width=True):
-                        _cur_price = current_prices.get(r["ticker"]) or r["price"]
-                        enter_position(
-                            signal_id=r["id"],
-                            ticker=r["ticker"],
-                            entry_price=_cur_price,
-                            confidence=int(r["confidence"]),
-                            stop_loss=r.get("stop_loss"),
-                            target=r.get("target"),
-                            user_id=user_id,
-                        )
-                        st.toast(f"✅ {r['ticker']} added to My Positions at ${_cur_price:.2f}")
+                        st.session_state[_confirm_key] = True
                         st.rerun()
-            st.markdown('<div style="margin-bottom:14px;"></div>', unsafe_allow_html=True)
+
+            # Inline confirmation form — shown after "Enter Position" is clicked
+            if st.session_state.get(_confirm_key):
+                _default_price = float(current_prices.get(r["ticker"]) or r["price"])
+                with st.container():
+                    st.markdown(
+                        f'<div style="background:#1a1a3a;border:1px solid #3333aa;border-radius:10px;padding:14px 16px;margin:6px 0 10px 0;">'
+                        f'<div style="font-size:13px;font-weight:600;color:#c0c0ff;margin-bottom:10px;">Confirm entry — {r["ticker"]}</div>',
+                        unsafe_allow_html=True,
+                    )
+                    _entry_price = st.number_input(
+                        "Your entry price ($)",
+                        min_value=0.01,
+                        value=_default_price,
+                        step=0.01,
+                        key=f"entry_price_input_{r['ticker']}_{r['date']}",
+                    )
+                    _col_confirm, _col_cancel = st.columns(2)
+                    with _col_confirm:
+                        if st.button("✅  Confirm", key=f"confirm_btn_{r['ticker']}_{r['date']}", use_container_width=True):
+                            enter_position(
+                                signal_id=r["id"],
+                                ticker=r["ticker"],
+                                entry_price=_entry_price,
+                                confidence=int(r["confidence"]),
+                                stop_loss=r.get("stop_loss"),
+                                target=r.get("target"),
+                                user_id=user_id,
+                            )
+                            st.session_state.pop(_confirm_key, None)
+                            st.toast(f"✅ {r['ticker']} added to My Positions at ${_entry_price:.2f}")
+                            st.rerun()
+                    with _col_cancel:
+                        if st.button("✖  Cancel", key=f"cancel_btn_{r['ticker']}_{r['date']}", use_container_width=True):
+                            st.session_state.pop(_confirm_key, None)
+                            st.rerun()
+                    st.markdown('</div>', unsafe_allow_html=True)
+            else:
+                st.markdown('<div style="margin-bottom:14px;"></div>', unsafe_allow_html=True)
 
 
 def show_recommended_view(user_id=""):
