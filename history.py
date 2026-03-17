@@ -103,13 +103,14 @@ def save_signal(ticker: str, sig: dict, price: float):
             """, (ticker, sig.get("signal"), today))
             if cur.fetchone():
                 return
-            # Auto-close any open BUY from a prior date at the current price
-            cur.execute("""
-                UPDATE signals
-                SET exit_price = %s, exit_date = %s
-                WHERE ticker = %s AND signal = 'BUY' AND exit_price IS NULL
-                  AND date < %s
-            """, (price, today, ticker, today))
+            # Auto-close any open BUY from a prior date when a SELL is confirmed
+            if sig.get("signal") == "SELL":
+                cur.execute("""
+                    UPDATE signals
+                    SET exit_price = %s, exit_date = %s
+                    WHERE ticker = %s AND signal = 'BUY' AND exit_price IS NULL
+                      AND date < %s
+                """, (price, today, ticker, today))
             cur.execute("""
                 INSERT INTO signals
                     (ticker, date, signal, confidence, rationale, entry_zone, stop_loss, target, price)
