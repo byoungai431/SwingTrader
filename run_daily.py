@@ -246,7 +246,7 @@ def run():
 
             signal = sig.get("signal", "ERROR")
             conf   = sig.get("confidence_stars", 0)
-            price  = ind["latest_close"]
+            price  = float(ind["latest_close"])
 
             # Suppress BUY signals when VIX is elevated
             if signal == "BUY" and buy_blocked:
