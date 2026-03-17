@@ -1037,13 +1037,13 @@ def show_recommended_view(user_id=""):
                     raw = yf.download(tickers, period="5d", progress=False, auto_adjust=True)
                     if len(tickers) == 1:
                         try:
-                            current_prices[tickers[0]] = float(raw["Close"].dropna().iloc[-1])
+                            current_prices[tickers[0]] = float(raw["Close"].dropna().iloc[-1].item())
                         except Exception:
                             pass
                     else:
                         for t in tickers:
                             try:
-                                current_prices[t] = float(raw["Close"][t].dropna().iloc[-1])
+                                current_prices[t] = float(raw["Close"][t].dropna().iloc[-1].item())
                             except Exception:
                                 pass
                 except Exception:
