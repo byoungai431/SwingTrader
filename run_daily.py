@@ -218,6 +218,7 @@ def run():
     results          = {"BUY": [], "SELL": [], "NO TRADE": [], "ERROR": []}
     notify_signals   = []   # collects signal dicts for BUY/SELL to notify at end
     skipped          = 0
+    rsi_filtered     = 0    # stocks skipped due to neutral RSI (40–60)
 
     for ticker in universe:
         # Skip if already processed today
@@ -232,6 +233,13 @@ def run():
                 continue
 
             ind  = compute_indicators(df)
+
+            # Skip neutral-RSI stocks — Claude almost never signals here
+            rsi = ind.get("rsi")
+            if rsi is not None and 40 < float(rsi) < 60:
+                rsi_filtered += 1
+                continue
+
             fund = fetch_fundamentals(ticker)
             sig  = get_signal(ticker, ind, fund)
 
@@ -278,6 +286,7 @@ def run():
     print(f"\n{'─'*60}")
     print(f"  Universe : {source}")
     print(f"  Skipped  : {skipped} (already run today)")
+    print(f"  Filtered : {rsi_filtered} (RSI 40–60, neutral zone)")
     print(f"  BUY      ({len(results['BUY'])}): {', '.join(results['BUY']) or '—'}")
     print(f"  SELL     ({len(results['SELL'])}): {', '.join(results['SELL']) or '—'}")
     print(f"  ERRORS   ({len(results['ERROR'])}): {', '.join(results['ERROR']) or '—'}")
