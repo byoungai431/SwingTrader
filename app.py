@@ -59,6 +59,10 @@ st.markdown("""
 
 @import url('https://fonts.googleapis.com/css2?family=Exo+2:wght@300;400;600;700;800;900&display=swap');
 
+/* ── Hide Streamlit toolbar (Share, Deploy, etc.) ── */
+[data-testid="stToolbar"] { display: none !important; }
+[data-testid="stDecoration"] { display: none !important; }
+
 /* ── Base font — explicit elements only; spans excluded to protect icon fonts ── */
 html, body, .stApp,
 div, p, h1, h2, h3, h4, h5, h6,
