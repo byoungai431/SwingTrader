@@ -1,13 +1,30 @@
 import time
+import requests
 import yfinance as yf
 import streamlit as st
 
 
+def _make_session() -> requests.Session:
+    """Return a requests session that mimics a real browser to avoid rate limits."""
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/122.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+    })
+    return s
+
+
 def _fetch_info(ticker: str) -> dict:
-    """Fetch yfinance info with up to 2 retries if data comes back sparse."""
+    """Fetch yfinance info with retries and browser-like headers."""
     for attempt in range(2):
         try:
-            info = yf.Ticker(ticker).info or {}
+            session = _make_session()
+            info = yf.Ticker(ticker, session=session).info or {}
             if len(info) >= 10:
                 return info
         except Exception:
