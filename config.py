@@ -32,12 +32,29 @@ VIX_MAX = None
 # ── Secrets: read from Streamlit secrets when running in the cloud,
 #    fall back to local values for scripts (run_daily.py, backtest, etc.)
 # ──────────────────────────────────────────────────────────────────────────────
+def _load_toml_secrets():
+    """Load .streamlit/secrets.toml for headless (non-Streamlit) runs."""
+    import os, tomllib, pathlib
+    toml_path = pathlib.Path(__file__).parent / ".streamlit" / "secrets.toml"
+    try:
+        with open(toml_path, "rb") as f:
+            return tomllib.load(f)
+    except Exception:
+        return {}
+
+_toml_secrets = None
+
 def _secret(key, fallback):
+    global _toml_secrets
     try:
         import streamlit as st
         return st.secrets[key]
     except Exception:
-        return fallback
+        pass
+    # Headless fallback: read from .streamlit/secrets.toml
+    if _toml_secrets is None:
+        _toml_secrets = _load_toml_secrets()
+    return _toml_secrets.get(key, fallback)
 
 ANTHROPIC_API_KEY  = _secret("ANTHROPIC_API_KEY",  "")
 

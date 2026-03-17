@@ -1,7 +1,19 @@
 import os
+import pathlib
 import psycopg2
 import psycopg2.extras
 from datetime import datetime
+
+
+def _load_toml_secret(key: str) -> str:
+    """Read a single key from .streamlit/secrets.toml for headless runs."""
+    import tomllib
+    toml_path = pathlib.Path(__file__).parent / ".streamlit" / "secrets.toml"
+    try:
+        with open(toml_path, "rb") as f:
+            return tomllib.load(f).get(key, "")
+    except Exception:
+        return ""
 
 
 def get_conn():
@@ -10,7 +22,7 @@ def get_conn():
         import streamlit as st
         url = st.secrets["DATABASE_URL"]
     except Exception:
-        url = os.environ.get("DATABASE_URL", "")
+        url = os.environ.get("DATABASE_URL", "") or _load_toml_secret("DATABASE_URL")
     if not url:
         raise RuntimeError("DATABASE_URL is not configured in secrets or environment.")
     return psycopg2.connect(url)
