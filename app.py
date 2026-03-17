@@ -1469,7 +1469,7 @@ st.sidebar.markdown(
 st.sidebar.divider()
 
 # ── User info + logout ─────────────────────────────────────────────────────────
-_display_name = st.experimental_user.name or st.experimental_user.email or "User"
+_display_name = (getattr(_st_user, "name", None) or getattr(_st_user, "email", None) or "User") if _st_user else "User"
 st.sidebar.markdown(
     f'<div style="font-size:11px;color:#5555aa;text-align:center;padding:2px 0 6px 0;">'
     f'Signed in as<br><span style="color:#c0c0ff;font-weight:600;">{_display_name}</span></div>',
