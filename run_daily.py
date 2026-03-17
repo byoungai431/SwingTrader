@@ -144,6 +144,7 @@ def _check_stop_target_hits(open_positions: list[dict]) -> list[dict]:
         cur = p.get("current_price")
         if not cur:
             continue
+        cur = float(cur)
         entry = p.get("price") or 0
         stop   = _parse_price(p.get("stop_loss"))
         target = _parse_price(p.get("target"))
@@ -164,7 +165,7 @@ def _check_stop_target_hits(open_positions: list[dict]) -> list[dict]:
                     db_cur.execute("""
                         UPDATE signals SET exit_price = %s, exit_date = %s
                         WHERE id = %s AND exit_price IS NULL
-                    """, (cur, today, p["id"]))
+                    """, (float(cur), today, p["id"]))
                 conn.commit()
                 conn.close()
             except Exception:
