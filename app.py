@@ -1463,10 +1463,7 @@ if run:
     st.session_state.show_recommended = False
     st.session_state.show_positions = False
 
-if st.sidebar.button("🔍  Run Full Scan", use_container_width=True, help="Scan all S&P 500 stocks — runs in background (~20 min). Results appear in Recommended when done."):
-    _script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run_daily.py")
-    subprocess.Popen([sys.executable, _script])
-    st.sidebar.success("✅ Scan started! Check Recommended in ~20 min.")
+
 
 # Consolidated JS — styles launch button (conditionally) and watchlist buttons
 _active_ticker = st.session_state.get("selected_ticker") or ""
