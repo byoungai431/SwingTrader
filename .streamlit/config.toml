@@ -3,3 +3,7 @@ base = "dark"
 
 [server]
 headless = true
+fileWatcherType = "watchdog"
+
+[client]
+toolbarMode = "developer"

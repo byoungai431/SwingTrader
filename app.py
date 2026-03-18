@@ -50,6 +50,9 @@ if _auth_enabled and _st_user is not None:
 else:
     user_id: str = "unknown"
 
+ADMIN_EMAIL = "byoungai431@gmail.com"
+is_admin = user_id == ADMIN_EMAIL
+
 DEMO_API_KEY = "your-api-key-here"
 def is_demo_mode(): return ANTHROPIC_API_KEY == DEMO_API_KEY
 
@@ -74,11 +77,8 @@ st.markdown("""
 
 @import url('https://fonts.googleapis.com/css2?family=Exo+2:wght@300;400;600;700;800;900&display=swap');
 
-/* ── Hide Streamlit toolbar and header bar ── */
-[data-testid="stToolbar"] { display: none !important; }
-[data-testid="stDecoration"] { display: none !important; }
-[data-testid="stHeader"] { display: none !important; }
-.stApp > header { display: none !important; }
+/* ── Hide Streamlit toolbar / header / manage-app for non-admin users ── */
+/* (admin byoungai431@gmail.com sees these natively — no CSS override) */
 
 /* ── Base font — explicit elements only; spans excluded to protect icon fonts ── */
 html, body, .stApp,
@@ -628,6 +628,20 @@ section[data-testid="stSidebar"] .stButton.home-btn > button:hover {
 </style>
 """, unsafe_allow_html=True)
 
+# Hide Streamlit chrome (toolbar, header, manage-app button) for non-admin users
+if not is_admin:
+    st.markdown("""
+<style>
+[data-testid="stToolbar"]          { display: none !important; }
+[data-testid="stDecoration"]       { display: none !important; }
+[data-testid="stHeader"]           { display: none !important; }
+.stApp > header                    { display: none !important; }
+[data-testid="stAppDeployButton"]      { display: none !important; }
+[data-testid="stBottom"]               { display: none !important; }
+[data-testid="stBottomBlockContainer"] { display: none !important; }
+</style>
+""", unsafe_allow_html=True)
+
 
 # ── Price level parser ─────────────────────────────────────────────────────────
 def _parse_level(s):
@@ -853,6 +867,25 @@ def mock_signal(ticker):
     }
 
 
+# ── Enter-position confirmation dialog ───────────────────────────────────────
+@st.dialog("Enter Position")
+def _enter_position_dialog(ticker, signal_id, default_price, confidence, stop_loss, target, user_id):
+    st.markdown(f"Set your fill price for **{ticker}**, then confirm.")
+    price = st.number_input("Entry price ($)", min_value=0.01, value=float(default_price), step=0.01)
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("✅  Confirm", use_container_width=True, type="primary"):
+            enter_position(
+                signal_id=signal_id, ticker=ticker, entry_price=price,
+                confidence=confidence, stop_loss=stop_loss, target=target, user_id=user_id,
+            )
+            st.toast(f"✅ {ticker} added to My Positions at ${price:.2f}")
+            st.rerun()
+    with c2:
+        if st.button("✖  Cancel", use_container_width=True):
+            st.rerun()
+
+
 # ── Recommended view ────────────────────────────────────────────────────────
 def _render_signal_cards(rows, current_prices, user_id=""):
     """Render open-signal cards for a list of DB rows."""
@@ -967,45 +1000,22 @@ def _render_signal_cards(rows, current_prices, user_id=""):
                     p["ticker"] == r["ticker"] and str(p.get("signal_id")) == str(r["id"])
                     for p in (get_my_open_positions(user_id) or [])
                 )
-                _confirm_key = f"confirm_enter_{r['ticker']}_{r['date']}"
                 if _already_in:
                     st.button("✅ In Positions", key=f"in_pos_{r['ticker']}_{r['date']}", use_container_width=True, disabled=True)
-                elif st.session_state.get(_confirm_key):
-                    st.button("📈  Enter Position", key=f"enter_{r['ticker']}_{r['date']}", use_container_width=True, disabled=True)
                 else:
                     if st.button("📈  Enter Position", key=f"enter_{r['ticker']}_{r['date']}", use_container_width=True):
-                        st.session_state[_confirm_key] = True
+                        _default_price = float(current_prices.get(r["ticker"]) or r["price"])
+                        _enter_position_dialog(
+                            ticker=r["ticker"],
+                            signal_id=r["id"],
+                            default_price=_default_price,
+                            confidence=int(r["confidence"]),
+                            stop_loss=r.get("stop_loss"),
+                            target=r.get("target"),
+                            user_id=user_id,
+                        )
 
-            if st.session_state.get(_confirm_key):
-                _default_price = float(current_prices.get(r["ticker"]) or r["price"])
-                with st.form(key=f"enter_form_{r['ticker']}_{r['date']}"):
-                    st.markdown(f"**Enter {r['ticker']}** — set your fill price then confirm, or cancel.")
-                    _entry_price = st.number_input(
-                        "Entry price ($)", min_value=0.01, value=_default_price, step=0.01
-                    )
-                    col_ok, col_cancel = st.columns(2)
-                    with col_ok:
-                        submitted = st.form_submit_button("✅  Confirm", use_container_width=True, type="primary")
-                    with col_cancel:
-                        cancelled = st.form_submit_button("✖  Cancel", use_container_width=True)
-                if submitted:
-                    enter_position(
-                        signal_id=r["id"],
-                        ticker=r["ticker"],
-                        entry_price=_entry_price,
-                        confidence=int(r["confidence"]),
-                        stop_loss=r.get("stop_loss"),
-                        target=r.get("target"),
-                        user_id=user_id,
-                    )
-                    st.session_state.pop(_confirm_key, None)
-                    st.toast(f"✅ {r['ticker']} added to My Positions at ${_entry_price:.2f}")
-                    st.rerun()
-                elif cancelled:
-                    st.session_state.pop(_confirm_key, None)
-                    st.rerun()
-            else:
-                st.markdown('<div style="margin-bottom:14px;"></div>', unsafe_allow_html=True)
+            st.markdown('<div style="margin-bottom:14px;"></div>', unsafe_allow_html=True)
 
 
 def show_recommended_view(user_id=""):
