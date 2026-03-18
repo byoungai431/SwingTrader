@@ -967,32 +967,45 @@ def _render_signal_cards(rows, current_prices, user_id=""):
                     p["ticker"] == r["ticker"] and str(p.get("signal_id")) == str(r["id"])
                     for p in (get_my_open_positions(user_id) or [])
                 )
+                _confirm_key = f"confirm_enter_{r['ticker']}_{r['date']}"
                 if _already_in:
                     st.button("✅ In Positions", key=f"in_pos_{r['ticker']}_{r['date']}", use_container_width=True, disabled=True)
+                elif st.session_state.get(_confirm_key):
+                    st.button("📈  Enter Position", key=f"enter_{r['ticker']}_{r['date']}", use_container_width=True, disabled=True)
                 else:
-                    _default_price = float(current_prices.get(r["ticker"]) or r["price"])
-                    with st.popover("📈  Enter Position", use_container_width=True):
-                        st.markdown(f"**{r['ticker']}** — confirm your fill price")
-                        _entry_price = st.number_input(
-                            "Entry price ($)",
-                            min_value=0.01,
-                            value=_default_price,
-                            step=0.01,
-                            key=f"entry_price_{r['ticker']}_{r['date']}",
-                        )
-                        if st.button("✅  Confirm Entry", key=f"confirm_{r['ticker']}_{r['date']}", use_container_width=True, type="primary"):
-                            enter_position(
-                                signal_id=r["id"],
-                                ticker=r["ticker"],
-                                entry_price=_entry_price,
-                                confidence=int(r["confidence"]),
-                                stop_loss=r.get("stop_loss"),
-                                target=r.get("target"),
-                                user_id=user_id,
-                            )
-                            st.toast(f"✅ {r['ticker']} added to My Positions at ${_entry_price:.2f}")
-                            st.rerun()
-            st.markdown('<div style="margin-bottom:14px;"></div>', unsafe_allow_html=True)
+                    if st.button("📈  Enter Position", key=f"enter_{r['ticker']}_{r['date']}", use_container_width=True):
+                        st.session_state[_confirm_key] = True
+
+            if st.session_state.get(_confirm_key):
+                _default_price = float(current_prices.get(r["ticker"]) or r["price"])
+                with st.form(key=f"enter_form_{r['ticker']}_{r['date']}"):
+                    st.markdown(f"**Enter {r['ticker']}** — set your fill price then confirm, or cancel.")
+                    _entry_price = st.number_input(
+                        "Entry price ($)", min_value=0.01, value=_default_price, step=0.01
+                    )
+                    col_ok, col_cancel = st.columns(2)
+                    with col_ok:
+                        submitted = st.form_submit_button("✅  Confirm", use_container_width=True, type="primary")
+                    with col_cancel:
+                        cancelled = st.form_submit_button("✖  Cancel", use_container_width=True)
+                if submitted:
+                    enter_position(
+                        signal_id=r["id"],
+                        ticker=r["ticker"],
+                        entry_price=_entry_price,
+                        confidence=int(r["confidence"]),
+                        stop_loss=r.get("stop_loss"),
+                        target=r.get("target"),
+                        user_id=user_id,
+                    )
+                    st.session_state.pop(_confirm_key, None)
+                    st.toast(f"✅ {r['ticker']} added to My Positions at ${_entry_price:.2f}")
+                    st.rerun()
+                elif cancelled:
+                    st.session_state.pop(_confirm_key, None)
+                    st.rerun()
+            else:
+                st.markdown('<div style="margin-bottom:14px;"></div>', unsafe_allow_html=True)
 
 
 def show_recommended_view(user_id=""):
