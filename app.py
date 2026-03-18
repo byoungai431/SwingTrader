@@ -853,31 +853,6 @@ def mock_signal(ticker):
     }
 
 
-@st.dialog("Confirm Trade Entry")
-def _enter_position_dialog(signal_id, ticker, default_price, confidence, stop_loss, target, user_id):
-    st.markdown(f"Set your fill price for **{ticker}** or cancel.")
-    entry_price = st.number_input(
-        "Entry price ($)", min_value=0.01, value=default_price, step=0.01
-    )
-    col_ok, col_cancel = st.columns(2)
-    with col_ok:
-        if st.button("✅  Confirm", use_container_width=True, type="primary"):
-            enter_position(
-                signal_id=signal_id,
-                ticker=ticker,
-                entry_price=entry_price,
-                confidence=confidence,
-                stop_loss=stop_loss,
-                target=target,
-                user_id=user_id,
-            )
-            st.toast(f"✅ {ticker} added to My Positions at ${entry_price:.2f}")
-            st.rerun()
-    with col_cancel:
-        if st.button("✖  Cancel", use_container_width=True):
-            st.rerun()
-
-
 # ── Recommended view ────────────────────────────────────────────────────────
 def _render_signal_cards(rows, current_prices, user_id=""):
     """Render open-signal cards for a list of DB rows."""
@@ -995,16 +970,28 @@ def _render_signal_cards(rows, current_prices, user_id=""):
                 if _already_in:
                     st.button("✅ In Positions", key=f"in_pos_{r['ticker']}_{r['date']}", use_container_width=True, disabled=True)
                 else:
-                    if st.button("📈  Enter Position", key=f"enter_{r['ticker']}_{r['date']}", use_container_width=True):
-                        _enter_position_dialog(
-                            signal_id=r["id"],
-                            ticker=r["ticker"],
-                            default_price=float(current_prices.get(r["ticker"]) or r["price"]),
-                            confidence=int(r["confidence"]),
-                            stop_loss=r.get("stop_loss"),
-                            target=r.get("target"),
-                            user_id=user_id,
+                    _default_price = float(current_prices.get(r["ticker"]) or r["price"])
+                    with st.popover("📈  Enter Position", use_container_width=True):
+                        st.markdown(f"**{r['ticker']}** — confirm your fill price")
+                        _entry_price = st.number_input(
+                            "Entry price ($)",
+                            min_value=0.01,
+                            value=_default_price,
+                            step=0.01,
+                            key=f"entry_price_{r['ticker']}_{r['date']}",
                         )
+                        if st.button("✅  Confirm Entry", key=f"confirm_{r['ticker']}_{r['date']}", use_container_width=True, type="primary"):
+                            enter_position(
+                                signal_id=r["id"],
+                                ticker=r["ticker"],
+                                entry_price=_entry_price,
+                                confidence=int(r["confidence"]),
+                                stop_loss=r.get("stop_loss"),
+                                target=r.get("target"),
+                                user_id=user_id,
+                            )
+                            st.toast(f"✅ {r['ticker']} added to My Positions at ${_entry_price:.2f}")
+                            st.rerun()
             st.markdown('<div style="margin-bottom:14px;"></div>', unsafe_allow_html=True)
 
 
