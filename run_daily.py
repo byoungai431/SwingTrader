@@ -33,6 +33,10 @@ MAX_HOLD_DAYS  = 30    # Trading-day hold limit for 3★/4★ trades
 MAX_HOLD_5STAR = 35    # Trading-day hold limit for 5★ trades
 STALE_CUT_DAYS = 12    # Exit after N trading days if gain < 0% (0 = disabled; 5★ exempt)
 
+# ── 5★ Consecutive Loss Cooldown ───────────────────────────────────────────────
+CONSEC_5STAR_LOSS_LIMIT   = 4   # Pause 5★ entries after this many consecutive losses
+CONSEC_5STAR_COOLDOWN_DAYS = 10  # Calendar days to sit out before re-enabling 5★ entries
+
 
 def _get_sp500_tickers():
     """Fetch current S&P 500 tickers from Wikipedia."""
@@ -85,6 +89,42 @@ def _in_cooldown(ticker: str, today: str, days: int = 5) -> bool:
             row = cur.fetchone()
         conn.close()
         return row is not None
+    except Exception:
+        return False
+
+
+def _in_5star_cooldown(today: str) -> bool:
+    """Return True if 5★ BUY entries should be paused due to a consecutive loss streak.
+
+    Queries the last CONSEC_5STAR_LOSS_LIMIT closed 5★ positions.  If every one
+    of them was a loss AND the most recent exit falls within CONSEC_5STAR_COOLDOWN_DAYS
+    calendar days, new 5★ BUY signals are suppressed.
+    """
+    try:
+        from datetime import datetime, timedelta
+        conn = get_conn()
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """SELECT exit_price, price, exit_date
+                     FROM signals
+                    WHERE signal = 'BUY' AND confidence = 5 AND exit_price IS NOT NULL
+                    ORDER BY exit_date DESC
+                    LIMIT %s""",
+                (CONSEC_5STAR_LOSS_LIMIT,)
+            )
+            rows = cur.fetchall()
+        conn.close()
+
+        if len(rows) < CONSEC_5STAR_LOSS_LIMIT:
+            return False
+
+        all_losses = all(float(r["exit_price"]) < float(r["price"]) for r in rows)
+        if not all_losses:
+            return False
+
+        most_recent_exit = str(rows[0]["exit_date"])[:10]
+        cutoff = (datetime.strptime(today, "%Y-%m-%d") - timedelta(days=CONSEC_5STAR_COOLDOWN_DAYS)).strftime("%Y-%m-%d")
+        return most_recent_exit >= cutoff
     except Exception:
         return False
 
@@ -277,10 +317,15 @@ def run():
     else:
         regime_label = "VIX unavailable — regime filter inactive"
 
+    star5_paused = _in_5star_cooldown(today)
+    star5_label  = f"⏸  PAUSED (≥{CONSEC_5STAR_LOSS_LIMIT} consec losses within {CONSEC_5STAR_COOLDOWN_DAYS}d)" \
+                   if star5_paused else "✅  Active"
+
     print(f"\n{'='*60}")
     print(f"  SwingTrader Daily Run — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print(f"  Universe: {source}")
     print(f"  Regime:   {regime_label}")
+    print(f"  5★ Entry: {star5_label}")
     print(f"{'='*60}\n")
 
     results          = {"BUY": [], "SELL": [], "NO TRADE": [], "ERROR": []}
@@ -317,6 +362,12 @@ def run():
 
             # Suppress BUY signals when VIX is elevated
             if signal == "BUY" and buy_blocked:
+                signal = "NO TRADE"
+                sig["signal"] = "NO TRADE"
+
+            # Suppress 5★ BUY signals during consecutive-loss cooldown
+            if signal == "BUY" and conf == 5 and _in_5star_cooldown(today):
+                print(f"         ⏸  5★ cooldown active — skipping {ticker}")
                 signal = "NO TRADE"
                 sig["signal"] = "NO TRADE"
 
