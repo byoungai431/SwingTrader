@@ -25,11 +25,12 @@ WL_FILE     = os.path.join(BASE_DIR, "watchlist.json")
 OUT_DIR     = os.path.join(BASE_DIR, "backtest results")
 os.makedirs(OUT_DIR, exist_ok=True)
 
-START_DATE  = "2022-01-01"
-END_DATE    = "2026-01-01"
-TRADE_SIZE       = 2_000   # $ per signal (flat)
-STARTING_BALANCE = 10_000  # $ starting account balance for compound growth simulation
-POSITION_PCT     = 0.20    # fraction of account per trade (20% = $2,000 on a $10,000 account)
+START_DATE  = "2020-01-01"
+END_DATE    = "2025-01-01"
+TRADE_SIZE       = 700     # $ per signal in the first year of the backtest
+TRADE_SIZE_GROWTH    = 0.50 # 50% size increase per subsequent year (multiplicative)
+STARTING_BALANCE = 4_000   # $ starting account balance
+POSITION_PCT     = 0.20    # fraction of account per trade (used only if compound mode re-enabled)
 COMMISSION    = 0.001      # 0.1% per side
 ATR_MULT      = 2.0        # stop = entry ± ATR_MULT × ATR14
 TP_PCT_3STAR  = 0.15       # take-profit for 3★ trades
@@ -38,7 +39,7 @@ TP_PCT_5STAR  = 0.25       # take-profit for 5★ trades (deep oversold RSI stra
 RSI_5STAR_ENTRY = 25       # RSI below this triggers a 5★ trade (overrides 3-of-4 gate)
 RSI_5STAR_EXIT  = 72       # Exit 5★ when RSI rises above this
 RSI_5STAR_DELAY = 0        # Bars to wait after RSI<25 signal before entering (0 = immediate)
-FLOOR_5STAR     = 0.00     # Soft floor: exit 5★ if trade drops this % from entry (0 = disabled)
+FLOOR_5STAR     = 0.10     # Soft floor: exit 5★ if trade drops this % from entry (0 = disabled)
 TRAIL_TRIGGER = 0.07       # activate trailing stop once trade gains this % from entry
 TRAIL_PCT     = 0.08       # trailing stop trails this % below the running high
 BREAKEVEN_TRIGGER = 0.00   # move stop to entry once trade gains this % (0 = disabled)
@@ -67,6 +68,8 @@ WEEKLY_TREND_FILTER = False # Only enter if price > 100-day MA (proxy for weekly
 RS_SPY_FILTER       = False # Only enter if stock's 5-day return > SPY's 5-day return
 EARNINGS_FILTER     = False # Skip signal if earnings date is within 5 calendar days of entry
 SPY_REGIME_5STAR    = False # Only allow 5★ entries when SPY is above its own 200-day MA (bull market gate)
+BEAR_MARKET_FILTER  = False # Block 3★/4★ entries when SPY closes below MA200 for N+ consecutive days (5★ still allowed)
+BEAR_MARKET_DAYS    = 5     # Number of consecutive days SPY must close below MA200 to trigger bear filter
 
 # ── VIX Regime Filter ─────────────────────────────────────────────────────────
 # When VIX_FILTER = True, BUY entries are blocked on days VIX > VIX_FILTER_MAX.
@@ -280,7 +283,7 @@ def confidence_count(df, i):
 # ── Download data ──────────────────────────────────────────────────────────────
 # Pull 1 extra year before START_DATE to warm up the 200-day MA
 warmup = (pd.Timestamp(START_DATE) - pd.Timedelta(days=400)).strftime("%Y-%m-%d")
-_need_spy = (RS_SPY_FILTER or SPY_REGIME_5STAR) and "SPY" not in TICKERS
+_need_spy = (RS_SPY_FILTER or SPY_REGIME_5STAR or BEAR_MARKET_FILTER) and "SPY" not in TICKERS
 tickers_to_dl = TICKERS + (["SPY"] if _need_spy else [])
 print(f"Downloading data for {len(tickers_to_dl)} tickers ({warmup} → {END_DATE})...")
 raw = yf.download(tickers_to_dl, start=warmup, end=END_DATE, progress=True, auto_adjust=True)
@@ -302,6 +305,23 @@ if RS_SPY_FILTER or SPY_REGIME_5STAR:
         print(f"  SPY data ready — regime gate: {bull_days} / {len(spy_regime)} days with 2-bar bull confirmation")
     except Exception as e:
         print(f"  Warning: could not extract SPY data — {e}")
+
+# ── Bear Market Filter (SPY below MA200 for N consecutive days → block 3★/4★) ─
+spy_bear_market = {}   # date → True if bear market halted (3★/4★ blocked)
+if BEAR_MARKET_FILTER:
+    try:
+        _spy_df = raw.xs("SPY", axis=1, level=1).copy() if raw.columns.nlevels > 1 else raw.copy()
+        _spy_df["ma200"] = _spy_df["Close"].rolling(200).mean()
+        _below = _spy_df["Close"] < _spy_df["ma200"]
+        # True on date i if below MA200 for BEAR_MARKET_DAYS consecutive days
+        _consec = _below.copy()
+        for _shift in range(1, BEAR_MARKET_DAYS):
+            _consec = _consec & _below.shift(_shift).fillna(False)
+        spy_bear_market = _consec.to_dict()
+        bear_days = sum(spy_bear_market.values())
+        print(f"  Bear market filter ready — {bear_days} / {len(spy_bear_market)} days with SPY below MA200 for {BEAR_MARKET_DAYS}+ consecutive days")
+    except Exception as e:
+        print(f"  Warning: could not compute bear market filter — {e}")
 
 # ── VIX data (used for regime filter and comparison tagging) ──────────────────
 vix_elevated = {}   # date → True if VIX closed above VIX_FILTER_MAX
@@ -541,7 +561,7 @@ for ticker in TICKERS:
                             "trail_high":       close,
                             "strategies":       strategy_labels(df, i, "BUY"),
                             "confidence_stars": 5,
-                            "trade_size":       TRADE_SIZE,
+                            "trade_size":       round(TRADE_SIZE * (1 + TRADE_SIZE_GROWTH) ** (date.year - int(START_DATE[:4]))),
                             "rsi_above_50":     False,
                             "rsi_above_70":     False,
                             "is_5star":         True,
@@ -551,6 +571,10 @@ for ticker in TICKERS:
                 else:
                     # 3★/4★ path: standard 3-of-4 gate (RSI >= RSI_5STAR_ENTRY)
                     sig = get_signal(df, i)
+
+                    # Bear market filter: block 3★/4★ entries when SPY below MA200 for 3+ days
+                    if sig == "BUY" and BEAR_MARKET_FILTER and spy_bear_market.get(date, False):
+                        sig = None
 
                     # VIX regime filter: block BUY entries on high-fear days
                     if sig == "BUY" and VIX_FILTER and vix_elevated.get(date, False):
@@ -583,7 +607,7 @@ for ticker in TICKERS:
                             "trail_high":       close,
                             "strategies":       strategy_labels(df, i, "BUY"),
                             "confidence_stars": stars,
-                            "trade_size":       TRADE_SIZE,
+                            "trade_size":       round(TRADE_SIZE * (1 + TRADE_SIZE_GROWTH) ** (date.year - int(START_DATE[:4]))),
                             "rsi_above_50":     False,
                             "rsi_above_70":     False,
                             "is_5star":         False,
@@ -706,25 +730,25 @@ vix_high_trades   = [t for t in all_trades if     t.get("vix_high", False)]
 vix_normal_stats  = _vix_stats(vix_normal_trades)
 vix_high_stats    = _vix_stats(vix_high_trades)
 
-# ── Compound Growth Simulation ─────────────────────────────────────────────────
-# Sequential: sort trades by exit date, apply each trade's P&L % to 20% of
-# the running balance. Simulates $10,000 starting account compounding over time.
-compound_balance = float(STARTING_BALANCE)
-compound_trades_sorted = sorted(all_trades, key=lambda t: t["exit_date"])
+# ── Flat Growth Simulation (dynamic trade size, no compounding) ────────────────
+# Starting balance + flat P&L per trade. Trade size = TRADE_SIZE * 1.5^year
+# where year is relative to START_DATE (year 0 = base size, year 1 = +50%, etc.).
+flat_balance = float(STARTING_BALANCE)
+flat_trades_sorted = sorted(all_trades, key=lambda t: t["exit_date"])
 by_year_compound = {}
-for t in compound_trades_sorted:
-    year     = t["exit_date"][:4]
-    pos_size = compound_balance * POSITION_PCT
-    trade_pnl = t["pnl_pct"] * pos_size - pos_size * COMMISSION * 2
-    compound_balance += trade_pnl
-    by_year_compound.setdefault(year, {"trades": 0, "pnl": 0.0, "start_balance": 0.0})
+for t in flat_trades_sorted:
+    year      = t["exit_date"][:4]
+    trade_pnl = t["pnl_dollar"]
+    flat_balance += trade_pnl
+    by_year_compound.setdefault(year, {"trades": 0, "pnl": 0.0, "start_balance": 0.0, "trade_size": 0})
     if by_year_compound[year]["trades"] == 0:
-        # capture balance at start of first trade this year
-        by_year_compound[year]["start_balance"] = compound_balance - trade_pnl
+        by_year_compound[year]["start_balance"] = flat_balance - trade_pnl
+        by_year_compound[year]["trade_size"]     = round(TRADE_SIZE * (1 + TRADE_SIZE_GROWTH) ** (int(year) - int(START_DATE[:4])))
     by_year_compound[year]["trades"] += 1
     by_year_compound[year]["pnl"]    += trade_pnl
-    by_year_compound[year]["end_balance"] = compound_balance
-total_compound_gain   = compound_balance - STARTING_BALANCE
+    by_year_compound[year]["end_balance"] = flat_balance
+compound_balance      = flat_balance
+total_compound_gain   = flat_balance - STARTING_BALANCE
 total_compound_return = total_compound_gain / STARTING_BALANCE * 100
 
 # ── Write report ───────────────────────────────────────────────────────────────
@@ -742,6 +766,7 @@ if RSI_ONLY_MODE:             _filter_parts.append(f"RSIOnly{RSI_ENTRY_MAX}x{RSI
 _5star_tag = f"5ST{RSI_5STAR_ENTRY}x{RSI_5STAR_EXIT}" + (f"D{RSI_5STAR_DELAY}" if RSI_5STAR_DELAY > 0 else "") + (f"F{int(FLOOR_5STAR*100)}" if FLOOR_5STAR > 0 else "") + (f"MH{MAX_HOLD_5STAR}" if MAX_HOLD_5STAR != MAX_HOLD else "") + ("_SPREG" if SPY_REGIME_5STAR else "")
 _universe_tag = f"RAND{RANDOM_POOL_SIZE}s{RANDOM_SEED}" if USE_RANDOM_POOL else ("SP500" if USE_SP500 else "WL")
 if VIX_FILTER: _filter_parts.append(f"VIX{VIX_FILTER_MAX}")
+if BEAR_MARKET_FILTER: _filter_parts.append(f"BM{BEAR_MARKET_DAYS}d")
 RUN_TAG  = f"TP{TP_PCT_3STAR*100:g}-{TP_PCT_4STAR*100:g}-{TP_PCT_5STAR*100:g}pct_SL{ATR_MULT}_MH{MAX_HOLD}d_TT{TRAIL_TRIGGER*100:g}pct_TP{TRAIL_PCT*100:g}pct_BE{BREAKEVEN_TRIGGER*100:g}pct_{_5star_tag}_{'_'.join(_filter_parts)}_{_universe_tag}"
 OUT_FILE = os.path.join(OUT_DIR, f"backtest_{START_DATE}_{END_DATE}_{RUN_TAG}.txt")
 lines = []
@@ -751,7 +776,7 @@ lines += [
     "  TO THE MOON — Technical Backtest Report",
     f"  Period      : {START_DATE}  →  {END_DATE}",
     f"  Tickers     : {len(TICKERS)} {'random non-S&P500 (seed=' + str(RANDOM_SEED) + ')' if USE_RANDOM_POOL else 'S&P 500' if USE_SP500 else 'watchlist'} stocks",
-    f"  Trade Size  : ${TRADE_SIZE:,} assumed per signal",
+    f"  Trade Size  : ${TRADE_SIZE:,} (year 1), ×{1+TRADE_SIZE_GROWTH:.0%}/year thereafter",
     f"  Stop-Loss   : {ATR_MULT}× ATR14 from entry",
     f"  Trailing Stop: {TRAIL_TRIGGER*100:.0f}% gain trigger → trails {TRAIL_PCT*100:.0f}% below running high",
     f"  Breakeven Stop: move stop to entry at +{BREAKEVEN_TRIGGER*100:.0f}% gain" if BREAKEVEN_TRIGGER > 0 else "  Breakeven Stop: disabled",
@@ -761,8 +786,9 @@ lines += [
     f"  RSI Overbought Exit: {'ON — exit when RSI crosses back below 70 (profitable trades only)' if RSI_OVERBOUGHT_EXIT else 'OFF'}",
     f"  RSI-Only Mode: {'ON — entry on RSI < ' + str(RSI_ENTRY_MAX) + ' only; exit when RSI > ' + str(RSI_ONLY_EXIT) if RSI_ONLY_MODE else 'OFF'}",
     f"  Take-Profit : 3★ = {TP_PCT_3STAR*100:.0f}%  |  4★ = {TP_PCT_4STAR*100:.0f}%  |  5★ = {TP_PCT_5STAR*100:.0f}%  (tiered by confidence)",
-    f"  5★ Strategy : RSI < {RSI_5STAR_ENTRY}, {RSI_5STAR_DELAY}-bar entry delay, no stop-loss, no stale cut; exit on RSI > {RSI_5STAR_EXIT} or TP or Max Hold",
+    f"  5★ Strategy : RSI < {RSI_5STAR_ENTRY}, {RSI_5STAR_DELAY}-bar entry delay, {'floor -' + str(int(FLOOR_5STAR*100)) + '% stop' if FLOOR_5STAR > 0 else 'no stop-loss'}, no stale cut; exit on RSI > {RSI_5STAR_EXIT} or TP or Max Hold",
     f"  5★ SPY Gate : {'ON — entries require SPY above MA200 for 2 consecutive bars' if SPY_REGIME_5STAR else 'OFF'}",
+    f"  Bear Market : {'ON — 3★/4★ halted when SPY below MA200 for ' + str(BEAR_MARKET_DAYS) + '+ days (5★ still runs)' if BEAR_MARKET_FILTER else 'OFF'}",
     f"  VIX Filter  : {'ON — BUY entries blocked when VIX > ' + str(VIX_FILTER_MAX) if VIX_FILTER else 'OFF (tagging only — see VIX Regime Comparison)'}",
     f"  Min Signals : 3-of-4 conditions required",
     f"  RSI Entry   : < {RSI_ENTRY_MAX} (baseline was < 40; wider = catches more pullbacks)",
@@ -790,19 +816,19 @@ lines += [
     "",
 ]
 
-lines += ["COMPOUND GROWTH SIMULATION", DIV2,
+lines += ["ACCOUNT GROWTH SIMULATION", DIV2,
           f"  Starting Balance : ${STARTING_BALANCE:,.0f}",
-          f"  Position Size    : {POSITION_PCT*100:.0f}% of account per trade (compounds as balance grows)",
-          f"  Method           : Sequential by exit date — each trade closes before next is sized",
+          f"  Trade Size       : ${TRADE_SIZE:,} in year 1, ×{1+TRADE_SIZE_GROWTH:.0%}/year thereafter (flat, no compounding)",
+          f"  Method           : Flat P&L per trade using year-specific trade size",
           ""]
-lines.append(f"  {'Year':<6}  {'Trades':>6}  {'Year P&L':>12}  {'End Balance':>14}  {'Year Return':>12}")
-lines.append(f"  {'-'*6}  {'-'*6}  {'-'*12}  {'-'*14}  {'-'*12}")
+lines.append(f"  {'Year':<6}  {'Size':>6}  {'Trades':>6}  {'Year P&L':>12}  {'End Balance':>14}  {'Yr Return':>10}")
+lines.append(f"  {'-'*6}  {'-'*6}  {'-'*6}  {'-'*12}  {'-'*14}  {'-'*10}")
 for year in sorted(by_year_compound.keys()):
     d   = by_year_compound[year]
-    yr  = d["pnl"] / d["start_balance"] * 100 if d["start_balance"] else 0
-    lines.append(f"  {year:<6}  {d['trades']:>6}  ${d['pnl']:>+11,.2f}  ${d['end_balance']:>13,.2f}  {yr:>+11.1f}%")
-lines.append(f"  {'-'*6}  {'-'*6}  {'-'*12}  {'-'*14}  {'-'*12}")
-lines.append(f"  {'TOTAL':<6}  {total:>6}  ${total_compound_gain:>+11,.2f}  ${compound_balance:>13,.2f}  {total_compound_return:>+11.1f}%")
+    yr  = d["pnl"] / STARTING_BALANCE * 100
+    lines.append(f"  {year:<6}  ${d['trade_size']:>5,}  {d['trades']:>6}  ${d['pnl']:>+11,.2f}  ${d['end_balance']:>13,.2f}  {yr:>+9.1f}%")
+lines.append(f"  {'-'*6}  {'-'*6}  {'-'*6}  {'-'*12}  {'-'*14}  {'-'*10}")
+lines.append(f"  {'TOTAL':<6}  {'':>6}  {total:>6}  ${total_compound_gain:>+11,.2f}  ${compound_balance:>13,.2f}  {total_compound_return:>+9.1f}%")
 lines.append("")
 
 lines += ["EXIT REASON BREAKDOWN", DIV2]
@@ -919,16 +945,16 @@ with open(CSV_FILE, "w", newline="") as f:
     writer.writerow(["Total P&L", f"${total_pnl:+,.2f}"])
     writer.writerow([])
 
-    # Compound growth simulation
-    writer.writerow(["COMPOUND GROWTH SIMULATION"])
+    # Account growth simulation
+    writer.writerow(["ACCOUNT GROWTH SIMULATION"])
     writer.writerow(["Starting Balance", f"${STARTING_BALANCE:,.0f}"])
-    writer.writerow(["Position Size", f"{POSITION_PCT*100:.0f}% of account per trade"])
-    writer.writerow(["Year", "Trades", "Year P&L", "End Balance", "Year Return %"])
+    writer.writerow(["Trade Size", f"${TRADE_SIZE:,} year 1, x{1+TRADE_SIZE_GROWTH:.0%}/year (flat)"])
+    writer.writerow(["Year", "Trade Size", "Trades", "Year P&L", "End Balance", "Yr Return %"])
     for year in sorted(by_year_compound.keys()):
         d  = by_year_compound[year]
-        yr = d["pnl"] / d["start_balance"] * 100 if d["start_balance"] else 0
-        writer.writerow([year, d["trades"], f"${d['pnl']:+,.2f}", f"${d['end_balance']:,.2f}", f"{yr:+.1f}%"])
-    writer.writerow(["TOTAL", total, f"${total_compound_gain:+,.2f}", f"${compound_balance:,.2f}", f"{total_compound_return:+.1f}%"])
+        yr = d["pnl"] / STARTING_BALANCE * 100
+        writer.writerow([year, f"${d['trade_size']:,}", d["trades"], f"${d['pnl']:+,.2f}", f"${d['end_balance']:,.2f}", f"{yr:+.1f}%"])
+    writer.writerow(["TOTAL", "", total, f"${total_compound_gain:+,.2f}", f"${compound_balance:,.2f}", f"{total_compound_return:+.1f}%"])
     writer.writerow([])
 
     # Exit reason breakdown

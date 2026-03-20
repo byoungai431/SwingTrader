@@ -90,6 +90,7 @@ def init_db():
 
 
 def save_signal(ticker: str, sig: dict, price: float):
+    price = float(price)  # guard against np.float64 (NumPy 2.0 breaks psycopg2 adaptation)
     init_db()
     today = datetime.now().strftime("%Y-%m-%d")
     conn = get_conn()

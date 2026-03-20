@@ -8,6 +8,7 @@ import sys
 import yfinance as yf
 import streamlit as st
 import streamlit.components.v1 as components
+from streamlit_autorefresh import st_autorefresh
 import plotly.graph_objects as go
 from datetime import date as _date
 from fetcher import fetch_price_data
@@ -21,6 +22,9 @@ from config import WATCHLIST, ANTHROPIC_API_KEY
 from notify import send_exit_alert
 
 st.set_page_config(page_title="To The Moon", layout="wide", page_icon="🚀")
+
+# Auto-refresh every 2 minutes so new scan results appear without manual reload
+st_autorefresh(interval=2 * 60 * 1000, key="autorefresh")
 
 # ── Auth gate ───────────────────────────────────────────────────────────────────
 try:

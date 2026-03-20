@@ -27,6 +27,12 @@ from notify import send_telegram, send_daily_summary, send_push, send_exit_alert
 # ── Set to False to fall back to watchlist only ───────────────────────────────
 USE_SP500 = True
 
+# ── Exit parameters (mirrors backtest.py config) ───────────────────────────────
+FLOOR_5STAR    = 0.10  # Exit 5★ if trade drops this % from entry (0 = disabled)
+MAX_HOLD_DAYS  = 30    # Trading-day hold limit for 3★/4★ trades
+MAX_HOLD_5STAR = 35    # Trading-day hold limit for 5★ trades
+STALE_CUT_DAYS = 12    # Exit after N trading days if gain < 0% (0 = disabled; 5★ exempt)
+
 
 def _get_sp500_tickers():
     """Fetch current S&P 500 tickers from Wikipedia."""
@@ -116,20 +122,31 @@ def _get_open_positions() -> list[dict]:
     if not positions:
         return []
 
-    # Fetch current prices for all open positions
+    # Fetch current prices + enough history to compute RSI(14) for all open positions
     tickers = list({p["ticker"] for p in positions})
     current_prices = {}
+    current_rsi = {}
     try:
-        raw = yf.download(tickers, period="5d", progress=False, auto_adjust=True)
+        raw = yf.download(tickers, period="3mo", progress=False, auto_adjust=True)
         if len(tickers) == 1:
             try:
-                current_prices[tickers[0]] = float(raw["Close"].dropna().iloc[-1])
+                close = raw["Close"].dropna()
+                current_prices[tickers[0]] = float(close.iloc[-1])
+                delta = close.diff()
+                gain = delta.clip(lower=0).ewm(com=13, min_periods=14).mean()
+                loss = (-delta.clip(upper=0)).ewm(com=13, min_periods=14).mean()
+                current_rsi[tickers[0]] = round(float(100 - 100 / (1 + gain / loss)).iloc[-1], 2)
             except Exception:
                 pass
         else:
             for t in tickers:
                 try:
-                    current_prices[t] = float(raw["Close"][t].dropna().iloc[-1])
+                    close = raw["Close"][t].dropna()
+                    current_prices[t] = float(close.iloc[-1])
+                    delta = close.diff()
+                    gain = delta.clip(lower=0).ewm(com=13, min_periods=14).mean()
+                    loss = (-delta.clip(upper=0)).ewm(com=13, min_periods=14).mean()
+                    current_rsi[t] = round(float(100 - 100 / (1 + gain / loss)).iloc[-1], 2)
                 except Exception:
                     pass
     except Exception:
@@ -138,6 +155,7 @@ def _get_open_positions() -> list[dict]:
     for p in positions:
         cur = current_prices.get(p["ticker"])
         p["current_price"] = cur
+        p["current_rsi"] = current_rsi.get(p["ticker"])
         entry = p.get("price") or 0
         if cur and entry:
             p["unrealized_pnl"] = (cur - entry) / entry * 100
@@ -148,7 +166,7 @@ def _get_open_positions() -> list[dict]:
 
 
 def _check_stop_target_hits(open_positions: list[dict]) -> list[dict]:
-    """Auto-close any position that hit its stop loss or target. Returns list of hits."""
+    """Auto-close any position that hit its stop loss, target, floor, max hold, or stale cut."""
     hits = []
     today = datetime.now().strftime("%Y-%m-%d")
     for p in open_positions:
@@ -159,6 +177,7 @@ def _check_stop_target_hits(open_positions: list[dict]) -> list[dict]:
         entry = p.get("price") or 0
         stop   = _parse_price(p.get("stop_loss"))
         target = _parse_price(p.get("target"))
+        conf   = p.get("confidence") or 0
 
         hit_type = None
         if stop and cur <= stop:
@@ -166,10 +185,47 @@ def _check_stop_target_hits(open_positions: list[dict]) -> list[dict]:
         elif target and cur >= target:
             hit_type = "TARGET"
 
+        # 5★ floor stop: exit if down FLOOR_5STAR% from entry (5★ have no regular stop)
+        if hit_type is None and conf == 5 and FLOOR_5STAR > 0 and entry:
+            if cur <= entry * (1 - FLOOR_5STAR):
+                hit_type = "FLOOR_5STAR"
+
+        # 5★ RSI momentum exit: exit when RSI > 72 (mirrors backtest RSI_5STAR_EXIT)
+        rsi_now = p.get("current_rsi")
+        if hit_type is None and conf == 5 and rsi_now is not None and rsi_now > 72:
+            hit_type = "RSI_EXIT"
+
+        # Max hold: exit after N trading days (30 for 3★/4★, 35 for 5★)
+        if hit_type is None and entry and p.get("date"):
+            try:
+                days_held = len(pd.bdate_range(str(p["date"])[:10], today))
+                max_hold = MAX_HOLD_5STAR if conf == 5 else MAX_HOLD_DAYS
+                if days_held >= max_hold:
+                    hit_type = "MAX_HOLD"
+            except Exception:
+                pass
+
+        # Stale cut: exit after STALE_CUT_DAYS if gain < 0% (5★ exempt)
+        if hit_type is None and conf != 5 and entry and p.get("date") and STALE_CUT_DAYS > 0:
+            try:
+                days_held = len(pd.bdate_range(str(p["date"])[:10], today))
+                if days_held >= STALE_CUT_DAYS and cur < entry:
+                    hit_type = "STALE_CUT"
+            except Exception:
+                pass
+
         if hit_type:
             pnl = (cur - entry) / entry * 100 if entry else 0
             pnl_sign = "+" if pnl >= 0 else ""
-            label = "Target hit" if hit_type == "TARGET" else "Stop loss hit"
+            label_map = {
+                "TARGET":      "Target hit",
+                "STOP":        "Stop loss hit",
+                "FLOOR_5STAR": f"Floor stop hit (-{int(FLOOR_5STAR * 100)}%)",
+                "RSI_EXIT":    f"RSI momentum exit (RSI {rsi_now:.1f} > 72)",
+                "MAX_HOLD":    "Max hold reached",
+                "STALE_CUT":   f"Stale cut (no gain after {STALE_CUT_DAYS}d)",
+            }
+            label = label_map.get(hit_type, hit_type)
             try:
                 conn = get_conn()
                 with conn.cursor() as db_cur:
@@ -184,7 +240,7 @@ def _check_stop_target_hits(open_positions: list[dict]) -> list[dict]:
             # Log a SELL row so history shows why the position was closed
             save_signal(p["ticker"], {
                 "signal":           "SELL",
-                "confidence_stars": p.get("confidence", 0),
+                "confidence_stars": conf,
                 "rationale":        f"{label} — {pnl_sign}{pnl:.2f}% from entry ${entry:.2f}",
                 "entry_zone":       None,
                 "stop_loss":        p.get("stop_loss"),

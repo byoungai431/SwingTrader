@@ -88,7 +88,7 @@ def compute_indicators(df: pd.DataFrame) -> dict:
         "macd_signal": round(signal_line, 4),
         "macd_histogram": round(macd_histogram, 4),
         "macd_crossover": macd_crossover,
-        "latest_close": round(close.iloc[-1], 2),
+        "latest_close": round(float(close.iloc[-1]), 2),
         "latest_date": df.index[-1].strftime("%Y-%m-%d"),
         "week52_high": week52_high,
         "week52_high_date": week52_high_date,
