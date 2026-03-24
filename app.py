@@ -890,6 +890,35 @@ def _enter_position_dialog(ticker, signal_id, default_price, confidence, stop_lo
             st.rerun()
 
 
+# ── Manual enter-position dialog (watchlist / user picks) ────────────────────
+@st.dialog("Enter Position")
+def _enter_position_manual_dialog(ticker, default_price, user_id):
+    st.markdown(f"Track your own position in **{ticker}**.")
+    price = st.number_input("Entry price ($)", min_value=0.01, value=float(default_price), step=0.01)
+    col_sl, col_tp = st.columns(2)
+    with col_sl:
+        stop_loss = st.number_input("Stop loss ($)", min_value=0.0, value=0.0, step=0.01,
+                                    help="Optional — leave 0 to skip")
+    with col_tp:
+        target = st.number_input("Target ($)", min_value=0.0, value=0.0, step=0.01,
+                                 help="Optional — leave 0 to skip")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("✅  Confirm", use_container_width=True, type="primary"):
+            enter_position(
+                signal_id=None, ticker=ticker, entry_price=price,
+                confidence=0,
+                stop_loss=stop_loss if stop_loss > 0 else None,
+                target=target if target > 0 else None,
+                user_id=user_id,
+            )
+            st.toast(f"✅ {ticker} added to My Positions at ${price:.2f}")
+            st.rerun()
+    with c2:
+        if st.button("✖  Cancel", use_container_width=True):
+            st.rerun()
+
+
 # ── Recommended view ────────────────────────────────────────────────────────
 def _render_signal_cards(rows, current_prices, user_id=""):
     """Render open-signal cards for a list of DB rows."""
@@ -2616,6 +2645,20 @@ for item in results:
                         f'</div>',
                         unsafe_allow_html=True
                     )
+
+    # ── Enter Position button ──────────────────────────────────────────────────
+    _already_in_pos = any(p["ticker"] == ticker for p in (get_my_open_positions(user_id) or []))
+    ep_col, _ = st.columns([1, 2])
+    with ep_col:
+        if _already_in_pos:
+            st.button("✅  In Positions", key=f"in_pos_{ticker}", use_container_width=True, disabled=True)
+        else:
+            if st.button("📈  Enter Position", key=f"enter_pos_{ticker}", use_container_width=True):
+                _enter_position_manual_dialog(
+                    ticker=ticker,
+                    default_price=float(ind["latest_close"]),
+                    user_id=user_id,
+                )
 
     st.markdown(
         '<hr style="border:none;height:1px;background:linear-gradient('
