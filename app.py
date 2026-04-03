@@ -1077,31 +1077,14 @@ def show_recommended_view(user_id=""):
     st.markdown(
         '<div style="text-align:center;padding:30px 0 20px 0;">'
         '<div class="anim-shimmer" style="font-size:38px;font-weight:900;letter-spacing:0.06em;">⭐ Recommended</div>'
-        '<div style="margin-top:18px;">'
-        '<div style="font-size:10px;color:#44446a;letter-spacing:0.20em;text-transform:uppercase;margin-bottom:10px;">Trade Tiers</div>'
-        '<div style="display:inline-flex;flex-direction:column;gap:6px;text-align:left;">'
-
-        '<div style="display:flex;align-items:center;gap:10px;">'
-        '<span style="font-size:20px;">🥉</span>'
-        '<span style="color:#cd7f32;font-size:13px;font-weight:700;letter-spacing:0.05em;">3★</span>'
-        '</div>'
-
-        '<div style="display:flex;align-items:center;gap:10px;">'
-        '<span style="font-size:20px;">🥈</span>'
-        '<span style="color:#a0a0c0;font-size:13px;font-weight:700;letter-spacing:0.05em;">4★</span>'
-        '</div>'
-
-        '<div style="display:flex;align-items:center;gap:10px;">'
-        '<span style="font-size:20px;">🥇</span>'
-        '<span style="color:#f9c846;font-size:13px;font-weight:700;letter-spacing:0.05em;">5★</span>'
-        '</div>'
-
-        '<div style="display:flex;align-items:center;gap:10px;">'
-        '<span style="font-size:20px;">💎</span>'
-        '<span style="color:#FFD700;font-size:13px;font-weight:900;letter-spacing:0.05em;text-shadow:0 0 8px rgba(255,215,0,0.7);">5★ MAX</span>'
-        '</div>'
-
-        '</div>'
+        '<div style="margin-top:16px;display:inline-flex;align-items:center;gap:4px;'
+        'background:rgba(255,255,255,0.03);border:1px solid #1c1c4a;border-radius:20px;'
+        'padding:6px 14px;">'
+        '<span style="font-size:9px;color:#8888bb;letter-spacing:0.18em;text-transform:uppercase;font-weight:700;margin-right:8px;">Tiers</span>'
+        '<span style="font-size:13px;margin-right:2px;">🥉</span><span style="color:#cd7f32;font-size:10px;font-weight:700;margin-right:10px;">3★</span>'
+        '<span style="font-size:13px;margin-right:2px;">🥈</span><span style="color:#a0a0c0;font-size:10px;font-weight:700;margin-right:10px;">4★</span>'
+        '<span style="font-size:13px;margin-right:2px;">🥇</span><span style="color:#f9c846;font-size:10px;font-weight:700;margin-right:10px;">5★</span>'
+        '<span style="font-size:13px;margin-right:2px;">💎</span><span style="color:#FFD700;font-size:10px;font-weight:900;text-shadow:0 0 6px rgba(255,215,0,0.6);">5★ MAX</span>'
         '</div>'
         '</div>',
         unsafe_allow_html=True
@@ -1598,88 +1581,29 @@ if is_demo_mode():
 if "selected_ticker" not in st.session_state:
     st.session_state.selected_ticker = None
 
-run = st.sidebar.button("⚡  Launch Sequence", type="primary", use_container_width=True)
-if run:
-    st.session_state.show_recommended = False
-    st.session_state.show_positions = False
-
-
-
-# Consolidated JS — styles launch button (conditionally) and watchlist buttons
+# JS — styles watchlist buttons
 _active_ticker = st.session_state.get("selected_ticker") or ""
-_analyzed      = st.session_state.get("analyzed", False)
-_should_pulse  = bool(_active_ticker) and not _analyzed
 _wl_json       = json.dumps(st.session_state.watchlist)
 components.html(f"""
 <script>
 (function() {{
     var doc = window.parent.document;
-    var watchlist  = {_wl_json};
-    var active     = {json.dumps(_active_ticker)};
-    var shouldPulse = {json.dumps(_should_pulse)};
-
-    if (!doc.getElementById('ls-style')) {{
-        var s = doc.createElement('style');
-        s.id = 'ls-style';
-        s.textContent = [
-            '@-webkit-keyframes lspulse {{',
-            '  0%,100% {{ -webkit-box-shadow:0 0 6px 2px rgba(255,200,0,.40),0 0 16px 4px rgba(255,165,0,.18);',
-            '             box-shadow:0 0 6px 2px rgba(255,200,0,.40),0 0 16px 4px rgba(255,165,0,.18);',
-            '             -webkit-transform:scale(1); transform:scale(1); }}',
-            '  50%      {{ -webkit-box-shadow:0 0 16px 5px rgba(255,215,0,.70),0 0 34px 9px rgba(255,165,0,.32);',
-            '             box-shadow:0 0 16px 5px rgba(255,215,0,.70),0 0 34px 9px rgba(255,165,0,.32);',
-            '             -webkit-transform:scale(1.018); transform:scale(1.018); }}',
-            '}}',
-            '@keyframes lspulse {{',
-            '  0%,100% {{ box-shadow:0 0 6px 2px rgba(255,200,0,.40),0 0 16px 4px rgba(255,165,0,.18); transform:scale(1); }}',
-            '  50%      {{ box-shadow:0 0 16px 5px rgba(255,215,0,.70),0 0 34px 9px rgba(255,165,0,.32); transform:scale(1.018); }}',
-            '}}',
-            '.ls-gold {{',
-            '  background: linear-gradient(135deg,#b8860b 0%,#ffd700 50%,#c8960c 100%) !important;',
-            '  color: #0a0a1a !important;',
-            '  border: 2px solid #ffe066 !important;',
-            '  font-weight: 900 !important;',
-            '  font-size: 15px !important;',
-            '  letter-spacing: .18em !important;',
-            '  border-radius: 10px !important;',
-            '}}',
-            '.ls-gold.ls-pulse {{',
-            '  -webkit-animation: lspulse 2.5s ease-in-out infinite !important;',
-            '  animation: lspulse 2.5s ease-in-out infinite !important;',
-            '}}',
-            '.ls-gold:hover {{',
-            '  -webkit-animation: none !important; animation: none !important;',
-            '  background: linear-gradient(135deg,#d4a017 0%,#ffe84d 50%,#d4a017 100%) !important;',
-            '  -webkit-transform: translateY(-2px) scale(1.02) !important;',
-            '  transform: translateY(-2px) scale(1.02) !important;',
-            '  box-shadow: 0 0 22px rgba(255,210,0,.75),0 0 50px rgba(255,185,0,.35) !important;',
-            '}}'
-        ].join('\\n');
-        doc.head.appendChild(s);
-    }}
+    var watchlist = {_wl_json};
+    var active    = {json.dumps(_active_ticker)};
 
     function applyAll() {{
         var sidebar = doc.querySelector('[data-testid="stSidebar"]');
         if (!sidebar) {{ setTimeout(applyAll, 150); return; }}
-        var launchFound = false;
         var wlFound = 0;
         sidebar.querySelectorAll('button').forEach(function(btn) {{
             var txt = btn.textContent.trim();
-            if (txt.indexOf('Launch Sequence') !== -1) {{
-                if (shouldPulse) {{
-                    btn.classList.add('ls-gold', 'ls-pulse');
-                }} else {{
-                    btn.classList.remove('ls-gold', 'ls-pulse');
-                }}
-                launchFound = true;
-            }}
             if (watchlist.indexOf(txt) !== -1) {{
                 btn.classList.remove('wl-ticker', 'wl-ticker-active');
                 btn.classList.add(txt === active ? 'wl-ticker-active' : 'wl-ticker');
                 wlFound++;
             }}
         }});
-        if (!launchFound || wlFound < watchlist.length) setTimeout(applyAll, 150);
+        if (wlFound < watchlist.length) setTimeout(applyAll, 150);
     }}
 
     applyAll();
@@ -1688,19 +1612,32 @@ components.html(f"""
 </script>
 """, height=0)
 
-st.sidebar.write("")
-rec_btn = st.sidebar.button("⭐  Recommended", use_container_width=True)
-if rec_btn:
-    st.session_state.show_recommended = not st.session_state.show_recommended
-    st.session_state.show_positions = False
-    st.rerun()
+st.sidebar.markdown(
+    '<div style="padding:4px 0 8px 0;">'
+    '<div style="font-size:9px;color:#8888bb;letter-spacing:0.22em;text-transform:uppercase;margin-bottom:8px;text-align:center;">Trade Tiers</div>'
+    '<div style="display:flex;flex-direction:column;gap:5px;">'
+    '<div style="display:flex;align-items:center;gap:8px;padding:4px 8px;border-radius:8px;background:rgba(255,255,255,0.03);">'
+    '<span style="font-size:14px;">🥉</span>'
+    '<span style="color:#cd7f32;font-size:11px;font-weight:700;">3★</span>'
+    '</div>'
+    '<div style="display:flex;align-items:center;gap:8px;padding:4px 8px;border-radius:8px;background:rgba(255,255,255,0.03);">'
+    '<span style="font-size:14px;">🥈</span>'
+    '<span style="color:#a0a0c0;font-size:11px;font-weight:700;">4★</span>'
+    '</div>'
+    '<div style="display:flex;align-items:center;gap:8px;padding:4px 8px;border-radius:8px;background:rgba(255,255,255,0.03);">'
+    '<span style="font-size:14px;">🥇</span>'
+    '<span style="color:#f9c846;font-size:11px;font-weight:700;">5★</span>'
+    '</div>'
+    '<div style="display:flex;align-items:center;gap:8px;padding:4px 8px;border-radius:8px;background:rgba(255,215,0,0.05);border:1px solid rgba(255,215,0,0.15);">'
+    '<span style="font-size:14px;">💎</span>'
+    '<span style="color:#FFD700;font-size:11px;font-weight:900;text-shadow:0 0 6px rgba(255,215,0,0.6);">5★ MAX</span>'
+    '</div>'
+    '</div>'
+    '</div>',
+    unsafe_allow_html=True
+)
 
-pos_btn = st.sidebar.button("📈  My Positions", use_container_width=True)
-if pos_btn:
-    st.session_state.show_positions = not st.session_state.show_positions
-    st.session_state.show_recommended = False
-    st.rerun()
-
+st.sidebar.divider()
 st.sidebar.write("")
 st.sidebar.markdown(
     '<div style="font-size:12px;color:#e8e8f8;letter-spacing:0.18em;'
@@ -1811,7 +1748,14 @@ st.markdown(
     '</div>'
     '<div class="anim-shimmer" style="font-size:48px;font-weight:900;letter-spacing:0.06em;margin:4px 0 8px 0;line-height:1.1;">To The Moon</div>'
     '<div style="font-size:13px;color:#8888bb;letter-spacing:0.22em;text-transform:uppercase;">✦ &nbsp; AI-Powered Swing Trading Signals &nbsp; ✦</div>'
-    '<div style="font-size:18px;letter-spacing:8px;color:#44446a;margin-top:10px;">★ ✧ ★ ✧ ★ ✧ ★</div>'
+    '<div style="margin-top:16px;display:inline-flex;align-items:center;gap:4px;'
+    'background:rgba(255,255,255,0.03);border:1px solid #1c1c4a;border-radius:20px;padding:6px 16px;">'
+    '<span style="font-size:9px;color:#8888bb;letter-spacing:0.18em;text-transform:uppercase;font-weight:700;margin-right:8px;">Tiers</span>'
+    '<span style="font-size:13px;margin-right:2px;">🥉</span><span style="color:#cd7f32;font-size:10px;font-weight:700;margin-right:10px;">3★</span>'
+    '<span style="font-size:13px;margin-right:2px;">🥈</span><span style="color:#a0a0c0;font-size:10px;font-weight:700;margin-right:10px;">4★</span>'
+    '<span style="font-size:13px;margin-right:2px;">🥇</span><span style="color:#f9c846;font-size:10px;font-weight:700;margin-right:10px;">5★</span>'
+    '<span style="font-size:13px;margin-right:2px;">💎</span><span style="color:#FFD700;font-size:10px;font-weight:900;text-shadow:0 0 6px rgba(255,215,0,0.6);">5★ MAX</span>'
+    '</div>'
     '</div>',
     unsafe_allow_html=True
 )
@@ -1852,11 +1796,11 @@ auto_run = st.session_state.auto_run
 if auto_run:
     st.session_state.auto_run = False
 
-if not run and not auto_run and not st.session_state.get("results"):
+if not auto_run and not st.session_state.get("results"):
     st.markdown(
         '<div style="text-align:center;padding:40px 20px;">'
         '<div style="font-size:36px;margin-bottom:12px;">🛸</div>'
-        '<div style="font-size:15px;letter-spacing:0.12em;text-transform:uppercase;color:#e8e8f8;">Select your targets in Mission Control, then hit Launch Sequence.</div>'
+        '<div style="font-size:15px;letter-spacing:0.12em;text-transform:uppercase;color:#e8e8f8;">Select a target from Mission Control to begin analysis.</div>'
         '</div>',
         unsafe_allow_html=True
     )
@@ -1866,9 +1810,8 @@ if not selected_tickers:
     st.warning("Please select at least one stock.")
     st.stop()
 
-# Re-run analysis only when the Launch button is pressed or tickers changed
 cached_tickers = st.session_state.get("results_tickers", [])
-if run or auto_run or selected_tickers != cached_tickers:
+if auto_run or selected_tickers != cached_tickers:
     results = []
     progress = st.progress(0, text="📡 Establishing deep space connection...")
     for i, ticker in enumerate(selected_tickers):
