@@ -25,8 +25,8 @@ WL_FILE     = os.path.join(BASE_DIR, "watchlist.json")
 OUT_DIR     = os.path.join(BASE_DIR, "backtest results")
 os.makedirs(OUT_DIR, exist_ok=True)
 
-START_DATE  = "2020-01-01"
-END_DATE    = "2025-01-01"
+START_DATE  = "2015-01-01"
+END_DATE    = "2026-01-01"
 TRADE_SIZE       = 700     # $ per signal in the first year of the backtest
 TRADE_SIZE_GROWTH    = 0.50 # 50% size increase per subsequent year (multiplicative)
 STARTING_BALANCE = 4_000   # $ starting account balance
@@ -35,7 +35,8 @@ COMMISSION    = 0.001      # 0.1% per side
 ATR_MULT      = 2.0        # stop = entry ± ATR_MULT × ATR14
 TP_PCT_3STAR  = 0.15       # take-profit for 3★ trades
 TP_PCT_4STAR  = 0.20       # take-profit for 4★ trades
-TP_PCT_5STAR  = 0.25       # take-profit for 5★ trades (deep oversold RSI strategy)
+TP_PCT_5STAR     = 0.25    # take-profit for 5★ trades (deep oversold RSI strategy)
+TP_PCT_5STAR_MAX = 0.25    # take-profit for 5★ MAX trades (RSI < 25 + price ≤ lower BB)
 RSI_5STAR_ENTRY = 25       # RSI below this triggers a 5★ trade (overrides 3-of-4 gate)
 RSI_5STAR_EXIT  = 72       # Exit 5★ when RSI rises above this
 RSI_5STAR_DELAY = 0        # Bars to wait after RSI<25 signal before entering (0 = immediate)
@@ -55,6 +56,8 @@ PROFIT_LOCK_FLOOR    = 0.005 # Floor stop at entry + this % gain once PROFIT_LOC
 RSI_OVERBOUGHT_EXIT  = False # Exit when RSI crosses back below 70 after going overbought (>70), only if profitable
 RSI_ONLY_MODE        = False # Entry fires on RSI < RSI_ENTRY_MAX alone (bypasses 3-of-4); exit when RSI > RSI_ONLY_EXIT
 RSI_ONLY_EXIT        = 68    # Exit when RSI rises above this level (RSI_ONLY_MODE only)
+CONSEC_5STAR_LOSS_LIMIT    = 4   # Cooldown after N consecutive 5★ losses (0 = disabled)
+CONSEC_5STAR_COOLDOWN_DAYS = 10  # Trading days to block new 5★ entries after trigger
 USE_SP500        = True     # True = S&P 500 universe; False = watchlist or random pool
 SP500_LIMIT      = 500     # cap number of S&P 500 tickers to use
 USE_RANDOM_POOL  = False   # True = 600 random non-S&P500 US stocks; overrides USE_SP500/watchlist
@@ -144,6 +147,13 @@ def _macd_hist(close, fast=12, slow=26, sig=9):
     signal = macd.ewm(span=sig, adjust=False).mean()
     return macd - signal
 
+def _bollinger(close, period=20, std_dev=2):
+    mid   = close.rolling(period).mean()
+    std   = close.rolling(period).std()
+    upper = mid + std_dev * std
+    lower = mid - std_dev * std
+    return upper, mid, lower
+
 def _atr(high, low, close, period=14):
     tr = pd.concat([
         high - low,
@@ -163,6 +173,10 @@ def build_indicator_df(raw_df):
     df["vol_avg20"] = df["Volume"].rolling(20).mean()
     df["rel_vol"]   = df["Volume"] / df["vol_avg20"]
     df["ret5"]      = df["Close"].pct_change(5)         # 5-day return for RS vs SPY filter
+    bb_upper, bb_mid, bb_lower = _bollinger(df["Close"])
+    df["bb_upper"]  = bb_upper
+    df["bb_mid"]    = bb_mid
+    df["bb_lower"]  = bb_lower
     return df
 
 # ── Signal logic ───────────────────────────────────────────────────────────────
@@ -549,9 +563,16 @@ for ticker in TICKERS:
                         pending_5star += 1
 
                     if pending_5star > RSI_5STAR_DELAY:
-                        # Delay elapsed — enter as 5★ at today's close
+                        # Delay elapsed — enter as 5★ (or 5★ MAX if BB also confirms)
                         pending_5star = 0
-                        target = close * (1 + TP_PCT_5STAR)
+                        bb_lower_val = row.get("bb_lower", float("nan"))
+                        is_5star_max = not pd.isna(bb_lower_val) and close <= bb_lower_val
+                        stars  = 6 if is_5star_max else 5
+                        tp_pct = TP_PCT_5STAR_MAX if is_5star_max else TP_PCT_5STAR
+                        target = close * (1 + tp_pct)
+                        strat  = strategy_labels(df, i, "BUY")
+                        if is_5star_max:
+                            strat = (strat + ", BB Lower Band") if strat else "BB Lower Band"
                         position = {
                             "direction":        "BUY",
                             "entry_date":       date,
@@ -559,8 +580,8 @@ for ticker in TICKERS:
                             "stop":             0,
                             "target":           target,
                             "trail_high":       close,
-                            "strategies":       strategy_labels(df, i, "BUY"),
-                            "confidence_stars": 5,
+                            "strategies":       strat,
+                            "confidence_stars": stars,
                             "trade_size":       round(TRADE_SIZE * (1 + TRADE_SIZE_GROWTH) ** (date.year - int(START_DATE[:4]))),
                             "rsi_above_50":     False,
                             "rsi_above_70":     False,
@@ -645,6 +666,35 @@ for ticker in TICKERS:
 
     except Exception as e:
         print(f"  {ticker}: ERROR — {e}")
+
+# ── 5★ Consecutive Loss Cooldown (portfolio-level, post-processing) ──────────
+skipped_5star_trades = []
+cooldown_trigger_log = []   # [(trigger_exit_date, cooldown_until_date), ...]
+if CONSEC_5STAR_LOSS_LIMIT > 0:
+    consec_5star_losses = 0
+    cooldown_until      = None   # pd.Timestamp: block 5★ entries on/before this date
+    for t in sorted(all_trades, key=lambda t: t["entry_date"]):
+        if t["confidence_stars"] not in (5, 6):
+            t["_skip_cd"] = False
+            continue
+        entry_dt = pd.Timestamp(t["entry_date"])
+        if cooldown_until is not None and entry_dt <= cooldown_until:
+            t["_skip_cd"] = True
+            skipped_5star_trades.append(t)
+        else:
+            t["_skip_cd"] = False
+            if t["pnl_dollar"] <= 0:
+                consec_5star_losses += 1
+                if consec_5star_losses >= CONSEC_5STAR_LOSS_LIMIT:
+                    exit_dt = pd.Timestamp(t["exit_date"])
+                    cd_dates = pd.bdate_range(exit_dt + pd.Timedelta(days=1),
+                                              periods=CONSEC_5STAR_COOLDOWN_DAYS)
+                    cooldown_until = cd_dates[-1] if len(cd_dates) else exit_dt
+                    cooldown_trigger_log.append((t["exit_date"], cooldown_until.strftime("%Y-%m-%d")))
+                    consec_5star_losses = 0
+            else:
+                consec_5star_losses = 0   # win resets streak; cooldown expires naturally
+    all_trades = [t for t in all_trades if not t.get("_skip_cd", False)]
 
 # ── Aggregate stats ────────────────────────────────────────────────────────────
 total   = len(all_trades)
@@ -763,10 +813,11 @@ if STALE_CUT_DAYS > 0:        _filter_parts.append(f"SC{STALE_CUT_DAYS}G{int(STA
 if PROFIT_LOCK_TRIGGER > 0:   _filter_parts.append(f"PL{int(PROFIT_LOCK_TRIGGER*100)}F{int(PROFIT_LOCK_FLOOR*100)}")
 if RSI_OVERBOUGHT_EXIT:       _filter_parts.append("OB70")
 if RSI_ONLY_MODE:             _filter_parts.append(f"RSIOnly{RSI_ENTRY_MAX}x{RSI_ONLY_EXIT}")
-_5star_tag = f"5ST{RSI_5STAR_ENTRY}x{RSI_5STAR_EXIT}" + (f"D{RSI_5STAR_DELAY}" if RSI_5STAR_DELAY > 0 else "") + (f"F{int(FLOOR_5STAR*100)}" if FLOOR_5STAR > 0 else "") + (f"MH{MAX_HOLD_5STAR}" if MAX_HOLD_5STAR != MAX_HOLD else "") + ("_SPREG" if SPY_REGIME_5STAR else "")
+_5star_tag = f"5ST{RSI_5STAR_ENTRY}x{RSI_5STAR_EXIT}" + (f"D{RSI_5STAR_DELAY}" if RSI_5STAR_DELAY > 0 else "") + (f"F{int(FLOOR_5STAR*100)}" if FLOOR_5STAR > 0 else "") + (f"MH{MAX_HOLD_5STAR}" if MAX_HOLD_5STAR != MAX_HOLD else "") + ("_SPREG" if SPY_REGIME_5STAR else "") + (f"_MAX{int(TP_PCT_5STAR_MAX*100)}" if TP_PCT_5STAR_MAX != TP_PCT_5STAR else "_MAX")
 _universe_tag = f"RAND{RANDOM_POOL_SIZE}s{RANDOM_SEED}" if USE_RANDOM_POOL else ("SP500" if USE_SP500 else "WL")
 if VIX_FILTER: _filter_parts.append(f"VIX{VIX_FILTER_MAX}")
 if BEAR_MARKET_FILTER: _filter_parts.append(f"BM{BEAR_MARKET_DAYS}d")
+if CONSEC_5STAR_LOSS_LIMIT > 0: _filter_parts.append(f"5SCD{CONSEC_5STAR_LOSS_LIMIT}x{CONSEC_5STAR_COOLDOWN_DAYS}")
 RUN_TAG  = f"TP{TP_PCT_3STAR*100:g}-{TP_PCT_4STAR*100:g}-{TP_PCT_5STAR*100:g}pct_SL{ATR_MULT}_MH{MAX_HOLD}d_TT{TRAIL_TRIGGER*100:g}pct_TP{TRAIL_PCT*100:g}pct_BE{BREAKEVEN_TRIGGER*100:g}pct_{_5star_tag}_{'_'.join(_filter_parts)}_{_universe_tag}"
 OUT_FILE = os.path.join(OUT_DIR, f"backtest_{START_DATE}_{END_DATE}_{RUN_TAG}.txt")
 lines = []
@@ -785,8 +836,9 @@ lines += [
     f"  Profit Lock: {'ON — floor stop at +' + str(int(PROFIT_LOCK_FLOOR*100)) + '% once gain reaches +' + str(int(PROFIT_LOCK_TRIGGER*100)) + '%' if PROFIT_LOCK_TRIGGER > 0 else 'OFF'}",
     f"  RSI Overbought Exit: {'ON — exit when RSI crosses back below 70 (profitable trades only)' if RSI_OVERBOUGHT_EXIT else 'OFF'}",
     f"  RSI-Only Mode: {'ON — entry on RSI < ' + str(RSI_ENTRY_MAX) + ' only; exit when RSI > ' + str(RSI_ONLY_EXIT) if RSI_ONLY_MODE else 'OFF'}",
-    f"  Take-Profit : 3★ = {TP_PCT_3STAR*100:.0f}%  |  4★ = {TP_PCT_4STAR*100:.0f}%  |  5★ = {TP_PCT_5STAR*100:.0f}%  (tiered by confidence)",
+    f"  Take-Profit : 3★ = {TP_PCT_3STAR*100:.0f}%  |  4★ = {TP_PCT_4STAR*100:.0f}%  |  5★ = {TP_PCT_5STAR*100:.0f}%  |  5★ MAX = {TP_PCT_5STAR_MAX*100:.0f}%  (tiered by confidence)",
     f"  5★ Strategy : RSI < {RSI_5STAR_ENTRY}, {RSI_5STAR_DELAY}-bar entry delay, {'floor -' + str(int(FLOOR_5STAR*100)) + '% stop' if FLOOR_5STAR > 0 else 'no stop-loss'}, no stale cut; exit on RSI > {RSI_5STAR_EXIT} or TP or Max Hold",
+    f"  5★ MAX      : RSI < {RSI_5STAR_ENTRY} + price ≤ lower BB (20,2) — subset of 5★ with Bollinger Band confirmation",
     f"  5★ SPY Gate : {'ON — entries require SPY above MA200 for 2 consecutive bars' if SPY_REGIME_5STAR else 'OFF'}",
     f"  Bear Market : {'ON — 3★/4★ halted when SPY below MA200 for ' + str(BEAR_MARKET_DAYS) + '+ days (5★ still runs)' if BEAR_MARKET_FILTER else 'OFF'}",
     f"  VIX Filter  : {'ON — BUY entries blocked when VIX > ' + str(VIX_FILTER_MAX) if VIX_FILTER else 'OFF (tagging only — see VIX Regime Comparison)'}",
@@ -798,6 +850,7 @@ lines += [
     f"  Entry Style : MA50 Pullback Bounce (enters on dip recovery, not continuation)",
     f"  Max Hold    : {MAX_HOLD} trading days (3★/4★)  |  {MAX_HOLD_5STAR} trading days (5★)",
     f"  Commission  : {COMMISSION * 100:.1f}% per side",
+    f"  5★ Consec Loss CD: {'after ' + str(CONSEC_5STAR_LOSS_LIMIT) + ' losses → ' + str(CONSEC_5STAR_COOLDOWN_DAYS) + '-day cooldown (' + str(len(skipped_5star_trades)) + ' trades skipped, ' + str(len(cooldown_trigger_log)) + ' triggers)' if CONSEC_5STAR_LOSS_LIMIT > 0 else 'OFF'}",
     f"  Generated   : {datetime.today().strftime('%Y-%m-%d')}",
     DIV, "",
 ]
@@ -854,6 +907,21 @@ lines += [
     "",
 ]
 
+if CONSEC_5STAR_LOSS_LIMIT > 0:
+    skipped_pnl = sum(t["pnl_dollar"] for t in skipped_5star_trades)
+    skipped_wins = sum(1 for t in skipped_5star_trades if t["pnl_dollar"] > 0)
+    lines += ["5★ CONSECUTIVE LOSS COOLDOWN LOG", DIV2,
+              f"  Rule     : After {CONSEC_5STAR_LOSS_LIMIT} consecutive 5★ losses, block new 5★ entries for {CONSEC_5STAR_COOLDOWN_DAYS} trading days",
+              f"  Triggers : {len(cooldown_trigger_log)}",
+              f"  Skipped  : {len(skipped_5star_trades)} trades  |  Avoided P&L: ${skipped_pnl:+,.2f}  |  Skipped Win Rate: {skipped_wins/len(skipped_5star_trades)*100:.1f}%" if skipped_5star_trades else "  Skipped  : 0 trades",
+              ""]
+    if cooldown_trigger_log:
+        lines.append(f"  {'Triggered After Exit':<22}  {'Cooldown Until'}")
+        lines.append(f"  {'-'*22}  {'-'*14}")
+        for trigger_exit, until in cooldown_trigger_log:
+            lines.append(f"  {trigger_exit:<22}  {until}")
+        lines.append("")
+
 lines += ["PER-TICKER SUMMARY", DIV2,
           f"  {'Ticker':<8}  {'Trades':>6}  {'Wins':>5}  {'Win%':>6}  {'Total P&L':>12}"]
 lines.append(f"  {'-'*8}  {'-'*6}  {'-'*5}  {'-'*6}  {'-'*12}")
@@ -869,7 +937,8 @@ for stars in sorted(by_confidence.keys()):
     d  = by_confidence[stars]
     wr = d["wins"] / d["count"] * 100 if d["count"] else 0
     pf_val = round(d["gross_win"] / d["gross_loss"], 2) if d["gross_loss"] else 0
-    lines.append(f"  {stars}★{'':<6}  {d['count']:>6}  {d['wins']:>5}  {wr:>5.1f}%  {pf_val:>5.2f}  ${d['pnl']:>+11,.2f}")
+    label = "5★ MAX" if stars == 6 else f"{stars}★"
+    lines.append(f"  {label:<8}  {d['count']:>6}  {d['wins']:>5}  {wr:>5.1f}%  {pf_val:>5.2f}  ${d['pnl']:>+11,.2f}")
 lines.append("")
 
 lines += ["VIX REGIME COMPARISON", DIV2,
@@ -895,7 +964,8 @@ lines += ["FULL TRADE LOG", DIV2, ""]
 for idx, t in enumerate(all_trades, 1):
     result = "WIN " if t["pnl_dollar"] > 0 else "LOSS"
     stars  = t.get("confidence_stars", "?")
-    lines.append(f"  [{idx:>3}]  {t['ticker']:<6}  {t['signal']}  |  {result}  |  {t['exit_reason']}  ({stars}★)")
+    star_label = "5★ MAX" if stars == 6 else f"{stars}★"
+    lines.append(f"  [{idx:>3}]  {t['ticker']:<6}  {t['signal']}  |  {result}  |  {t['exit_reason']}  ({star_label})")
     lines.append(f"         Entry    : {t['entry_date']}  @  ${t['entry_price']:.2f}")
     lines.append(f"         Exit     : {t['exit_date']}  @  ${t['exit_price']:.2f}  ({t['hold_days']}d held)")
     lines.append(f"         Stop     : ${t['stop']:.2f}   Target: ${t['target']:.2f}")
@@ -980,7 +1050,8 @@ with open(CSV_FILE, "w", newline="") as f:
         d  = by_confidence[stars]
         wr = d["wins"] / d["count"] * 100 if d["count"] else 0
         pf_val = round(d["gross_win"] / d["gross_loss"], 2) if d["gross_loss"] else 0
-        writer.writerow([f"{stars}★", d["count"], d["wins"], f"{wr:.1f}%", pf_val, f"${d['pnl']:+,.2f}"])
+        label = "5★ MAX" if stars == 6 else f"{stars}★"
+        writer.writerow([label, d["count"], d["wins"], f"{wr:.1f}%", pf_val, f"${d['pnl']:+,.2f}"])
     writer.writerow([])
 
     # Per-condition analysis

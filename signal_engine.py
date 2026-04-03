@@ -40,7 +40,9 @@ Universal signal rules (apply to BOTH BUY and SELL):
 - MINIMUM 2 strategies must align to issue any BUY or SELL signal. One strategy alone is not enough.
 - Required risk/reward: target must be at least 2x the distance from entry to stop (R:R ≥ 2:1). If you cannot identify a clean entry, stop, and target that meets this ratio, issue NO TRADE.
 - High relative volume (≥ 1.5x average) strengthens breakout/breakdown signals. Low volume on a breakout or breakdown is a red flag — require additional confirmation or issue NO TRADE.
+- Bollinger Bands: price at or below the lower band (BB %B ≤ 0.0) combined with RSI < 30 is a stronger mean-reversion signal than RSI alone — treat this combination as additional confirmation for a BUY. Price above the upper band (BB %B ≥ 1.0) combined with RSI > 70 adds confirmation for a SELL or NO TRADE.
 - When in doubt, issue NO TRADE. Marginal setups do not qualify.
+- Earnings risk: if earnings are within 7 days and the signal is BUY, do NOT suppress the signal, but you MUST include a clear warning in the rationale (e.g. "⚠️ Earnings in X days — gap risk is elevated, size down or wait for the report.").
 
 Confidence scoring rules (STRICTLY follow this):
 - 0 or 1 strategy aligns → NO TRADE (do not issue BUY or SELL)
@@ -111,6 +113,15 @@ def build_user_message(ticker: str, indicators: dict, fundamentals: dict | None 
         ]
         sr_section = "\n--- KEY SUPPORT & RESISTANCE LEVELS ---\n" + "\n".join(lines) + "\n"
 
+    earnings_date = indicators.get("earnings_date")
+    days_to_earnings = indicators.get("days_to_earnings")
+    if earnings_date and days_to_earnings is not None:
+        earnings_line = f"Next Earnings: {earnings_date} ({days_to_earnings} days away)"
+        if days_to_earnings <= 7:
+            earnings_line += "  ⚠️ EARNINGS WITHIN 7 DAYS — flag this in rationale for BUY signals"
+    else:
+        earnings_line = "Next Earnings: N/A"
+
     return f"""Analyze this stock and produce a trading signal.
 
 --- STOCK DATA FOR {ticker} ---
@@ -129,6 +140,11 @@ Death Cross (MA50 < MA200): {not indicators.get('golden_cross', True) if indicat
 Volume Today: {indicators.get('vol_today', 'N/A'):,}
 Volume 20-Day Avg: {indicators.get('vol_avg20', 'N/A'):,}
 Relative Volume: {indicators.get('rel_vol', 'N/A')}x  [{indicators.get('vol_trend', 'N/A')}]
+Bollinger Upper: ${indicators.get('bb_upper', 'N/A')}
+Bollinger Middle: ${indicators.get('bb_middle', 'N/A')}
+Bollinger Lower: ${indicators.get('bb_lower', 'N/A')}
+BB %B (0=lower band, 1=upper band): {indicators.get('bb_pct', 'N/A')}
+{earnings_line}
 {fund_section}{pattern_section}{sr_section}
 Produce your signal now."""
 
@@ -176,6 +192,17 @@ def get_signal(ticker: str, indicators: dict, fundamentals: dict | None = None) 
         signal["confidence_stars"] = 5
         if "Deep-Oversold RSI (<25)" not in signal.get("strategies_aligned", []):
             signal.setdefault("strategies_aligned", []).append("Deep-Oversold RSI (<25)")
+
+    # ── 5★ MAX upgrade ────────────────────────────────────────────────────────
+    # RSI < 25 AND price ≤ lower Bollinger Band (20,2) → upgrade to tier 6.
+    # Backtest: 5★ MAX PF 2.67 vs regular 5★ PF 2.14 (SC12, 194 trades).
+    if signal.get("signal") == "BUY" and rsi is not None and float(rsi) < 25:
+        bb_lower     = indicators.get("bb_lower")
+        latest_close = indicators.get("latest_close")
+        if bb_lower is not None and latest_close is not None and float(latest_close) <= float(bb_lower):
+            signal["confidence_stars"] = 6
+            if "BB Lower Band" not in signal.get("strategies_aligned", []):
+                signal.setdefault("strategies_aligned", []).append("BB Lower Band")
 
     return signal
 

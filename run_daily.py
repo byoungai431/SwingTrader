@@ -22,7 +22,7 @@ from indicators import compute_indicators
 from fundamentals import fetch_fundamentals
 from signal_engine import get_signal
 from history import save_signal, get_performance_stats, get_conn
-from notify import send_telegram, send_daily_summary, send_push, send_exit_alert
+from notify import send_telegram, send_daily_summary, send_daily_telegram, send_push, send_exit_alert
 
 # ── Set to False to fall back to watchlist only ───────────────────────────────
 USE_SP500 = True
@@ -107,7 +107,7 @@ def _in_5star_cooldown(today: str) -> bool:
             cur.execute(
                 """SELECT exit_price, price, exit_date
                      FROM signals
-                    WHERE signal = 'BUY' AND confidence = 5 AND exit_price IS NOT NULL
+                    WHERE signal = 'BUY' AND confidence >= 5 AND exit_price IS NOT NULL
                     ORDER BY exit_date DESC
                     LIMIT %s""",
                 (CONSEC_5STAR_LOSS_LIMIT,)
@@ -239,7 +239,7 @@ def _check_stop_target_hits(open_positions: list[dict]) -> list[dict]:
         if hit_type is None and entry and p.get("date"):
             try:
                 days_held = len(pd.bdate_range(str(p["date"])[:10], today))
-                max_hold = MAX_HOLD_5STAR if conf == 5 else MAX_HOLD_DAYS
+                max_hold = MAX_HOLD_5STAR if conf >= 5 else MAX_HOLD_DAYS
                 if days_held >= max_hold:
                     hit_type = "MAX_HOLD"
             except Exception:
@@ -261,7 +261,7 @@ def _check_stop_target_hits(open_positions: list[dict]) -> list[dict]:
                 "TARGET":      "Target hit",
                 "STOP":        "Stop loss hit",
                 "FLOOR_5STAR": f"Floor stop hit (-{int(FLOOR_5STAR * 100)}%)",
-                "RSI_EXIT":    f"RSI momentum exit (RSI {rsi_now:.1f} > 72)",
+                "RSI_EXIT":    f"RSI momentum exit (RSI {rsi_now:.1f} > 72)" if rsi_now is not None else "RSI momentum exit",
                 "MAX_HOLD":    "Max hold reached",
                 "STALE_CUT":   f"Stale cut (no gain after {STALE_CUT_DAYS}d)",
             }
@@ -345,7 +345,7 @@ def run():
                 print(f"  {ticker}: no data")
                 continue
 
-            ind  = compute_indicators(df)
+            ind  = compute_indicators(df, ticker)
 
             # Skip neutral-RSI stocks — Claude almost never signals here
             rsi = ind.get("rsi")
@@ -366,7 +366,7 @@ def run():
                 sig["signal"] = "NO TRADE"
 
             # Suppress 5★ BUY signals during consecutive-loss cooldown
-            if signal == "BUY" and conf == 5 and _in_5star_cooldown(today):
+            if signal == "BUY" and conf >= 5 and _in_5star_cooldown(today):
                 print(f"         ⏸  5★ cooldown active — skipping {ticker}")
                 signal = "NO TRADE"
                 sig["signal"] = "NO TRADE"
@@ -401,9 +401,6 @@ def run():
                     "rationale":  sig.get("rationale"),
                 }
                 notify_signals.append(signal_dict)
-                # Only push immediate alert for 4★/5★ BUY signals
-                if signal == "BUY" and conf >= 4:
-                    send_telegram([signal_dict])
 
             results[signal if signal in results else "ERROR"].append(ticker)
 
@@ -441,6 +438,8 @@ def run():
     send_daily_summary(notify_signals, results, source, skipped, open_positions, perf,
                        vix_level=vix_level, vix_max=VIX_MAX)
     send_push(notify_signals)
+    # Telegram: 4★/5★ only — explicitly states if none found
+    send_daily_telegram(notify_signals)
 
 
 if __name__ == "__main__":

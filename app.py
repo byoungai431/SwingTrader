@@ -72,7 +72,23 @@ if "watchlist" not in st.session_state or st.session_state.get("_wl_user") != us
     st.session_state.watchlist = get_watchlist(user_id) or list(WATCHLIST)
     st.session_state._wl_user  = user_id
 def badge(label, color): return f'<span class="badge badge-{color}">{label}</span>'
-def stars(n): return "★" * int(n) + "☆" * (5 - int(n))
+def stars(n):
+    n = int(n)
+    if n >= 6:
+        return "★★★★★ MAX"
+    return "★" * n + "☆" * (5 - n)
+def conf_stars_html(n):
+    """Return HTML star display; confidence=6 renders as golden '5★ MAX'."""
+    n = int(n)
+    if n >= 6:
+        return (
+            '<span style="color:#FFD700;font-weight:800;letter-spacing:2px;'
+            'text-shadow:0 0 12px rgba(255,215,0,0.9);">★★★★★</span>'
+            '<span style="color:#FFD700;font-size:0.70em;font-weight:900;'
+            'letter-spacing:0.12em;text-shadow:0 0 12px rgba(255,215,0,0.9);'
+            'margin-left:5px;">MAX</span>'
+        )
+    return "★" * n + "☆" * (5 - n)
 
 
 # ── Global CSS ─────────────────────────────────────────────────────────────────
@@ -404,6 +420,7 @@ section[data-testid="stSidebar"] .stButton.home-btn > button:hover {
 .signal-text-sell { color:#ff6b6b; font-size:30px; font-weight:800; text-shadow:0 0 20px rgba(255,107,107,0.65); letter-spacing:0.06em; }
 .signal-text-none { color:#aaaacc; font-size:22px; font-weight:700; }
 .conf-stars       { font-size:22px; letter-spacing:4px; margin:8px 0; color:#f9c846; text-shadow:0 0 14px rgba(249,200,70,0.75); }
+.conf-stars-max   { font-size:22px; letter-spacing:2px; margin:8px 0; color:#FFD700; font-weight:800; text-shadow:0 0 18px rgba(255,215,0,1.0), 0 0 30px rgba(255,180,0,0.6); }
 .rationale        { font-size:13px; color:#c8c8e8; line-height:1.80; margin-top:10px; }
 
 /* ── Range ── */
@@ -922,18 +939,23 @@ def _enter_position_manual_dialog(ticker, default_price, user_id):
 # ── Recommended view ────────────────────────────────────────────────────────
 def _render_signal_cards(rows, current_prices, user_id=""):
     """Render open-signal cards for a list of DB rows."""
-    five_star = [r for r in rows if int(r["confidence"]) == 5]
-    four_star  = [r for r in rows if int(r["confidence"]) == 4]
+    five_star_max = [r for r in rows if int(r["confidence"]) >= 6]
+    five_star     = [r for r in rows if int(r["confidence"]) == 5]
+    four_star     = [r for r in rows if int(r["confidence"]) == 4]
 
     for section_label, icon, section_rows in [
+        ("5-Star MAX Signals", "★★★★★ MAX", five_star_max),
         ("5-Star Signals", "★★★★★", five_star),
         ("4-Star Signals", "★★★★☆", four_star),
     ]:
         if not section_rows:
             continue
+        is_max_section = section_label == "5-Star MAX Signals"
+        hdr_color  = "#FFD700" if is_max_section else "#8888bb"
+        hdr_border = "#3a2e00" if is_max_section else "#1c1c4a"
         st.markdown(
-            f'<div style="font-size:11px;color:#8888bb;letter-spacing:0.20em;text-transform:uppercase;'
-            f'margin:24px 0 12px 0;padding-bottom:8px;border-bottom:1px solid #1c1c4a;">'
+            f'<div style="font-size:11px;color:{hdr_color};letter-spacing:0.20em;text-transform:uppercase;'
+            f'margin:24px 0 12px 0;padding-bottom:8px;border-bottom:1px solid {hdr_border};">'
             f'{icon} &nbsp; {section_label} &nbsp;'
             f'<span style="color:#33336a;">({len(section_rows)} open)</span></div>',
             unsafe_allow_html=True
@@ -941,7 +963,7 @@ def _render_signal_cards(rows, current_prices, user_id=""):
         for r in section_rows:
             entry = r["price"]
             cur   = current_prices.get(r["ticker"])
-            conf_html = "★" * int(r["confidence"]) + "☆" * (5 - int(r["confidence"]))
+            conf_html = conf_stars_html(int(r["confidence"]))
 
             if entry and cur:
                 pnl_pct   = (cur - entry) / entry * 100 if r["signal"] == "BUY" else (entry - cur) / entry * 100
@@ -1053,10 +1075,34 @@ def _render_signal_cards(rows, current_prices, user_id=""):
 
 def show_recommended_view(user_id=""):
     st.markdown(
-        '<div style="text-align:center;padding:30px 0 16px 0;">'
+        '<div style="text-align:center;padding:30px 0 20px 0;">'
         '<div class="anim-shimmer" style="font-size:38px;font-weight:900;letter-spacing:0.06em;">⭐ Recommended</div>'
-        '<div style="font-size:12px;color:#8888bb;letter-spacing:0.20em;text-transform:uppercase;margin-top:8px;">'
-        '4★ &amp; 5★ signals &nbsp;·&nbsp; live prices &amp; trade history</div>'
+        '<div style="margin-top:18px;">'
+        '<div style="font-size:10px;color:#44446a;letter-spacing:0.20em;text-transform:uppercase;margin-bottom:10px;">Trade Tiers</div>'
+        '<div style="display:inline-flex;flex-direction:column;gap:6px;text-align:left;">'
+
+        '<div style="display:flex;align-items:center;gap:10px;">'
+        '<span style="font-size:20px;">🥉</span>'
+        '<span style="color:#cd7f32;font-size:13px;font-weight:700;letter-spacing:0.05em;">3★</span>'
+        '</div>'
+
+        '<div style="display:flex;align-items:center;gap:10px;">'
+        '<span style="font-size:20px;">🥈</span>'
+        '<span style="color:#a0a0c0;font-size:13px;font-weight:700;letter-spacing:0.05em;">4★</span>'
+        '</div>'
+
+        '<div style="display:flex;align-items:center;gap:10px;">'
+        '<span style="font-size:20px;">🥇</span>'
+        '<span style="color:#f9c846;font-size:13px;font-weight:700;letter-spacing:0.05em;">5★</span>'
+        '</div>'
+
+        '<div style="display:flex;align-items:center;gap:10px;">'
+        '<span style="font-size:20px;">💎</span>'
+        '<span style="color:#FFD700;font-size:13px;font-weight:900;letter-spacing:0.05em;text-shadow:0 0 8px rgba(255,215,0,0.7);">5★ MAX</span>'
+        '</div>'
+
+        '</div>'
+        '</div>'
         '</div>',
         unsafe_allow_html=True
     )
@@ -1239,7 +1285,7 @@ def show_recommended_view(user_id=""):
             for r in hist_rows:
                 entry      = r["price"]
                 exit_price = r["exit_price"]
-                conf_html  = "★" * int(r["confidence"]) + "☆" * (5 - int(r["confidence"]))
+                conf_html  = conf_stars_html(int(r["confidence"]))
                 sig_badge  = badge("▲ BUY", "green") if r["signal"] == "BUY" else badge("▼ SELL", "red")
 
                 if r["position_id"]:
@@ -1375,7 +1421,7 @@ def show_positions_view(user_id=""):
                 entry = p["entry_price"]
                 cur   = current_prices.get(p["ticker"])
                 conf  = int(p.get("confidence") or 0)
-                conf_html = "★" * conf + "☆" * (5 - conf)
+                conf_html = conf_stars_html(conf)
 
                 if cur and entry:
                     pnl_pct   = (cur - entry) / entry * 100
@@ -1487,7 +1533,7 @@ def show_positions_view(user_id=""):
                 pnl   = (ep - entry) / entry * 100 if ep else 0
                 pnl_color = "#39d98a" if pnl >= 0 else "#ff6b6b"
                 conf  = int(t.get("confidence") or 0)
-                conf_html = "★" * conf + "☆" * (5 - conf)
+                conf_html = conf_stars_html(conf)
                 sig_badge = badge("▲ BUY", "green")
 
                 st.markdown(
@@ -1828,7 +1874,7 @@ if run or auto_run or selected_tickers != cached_tickers:
     for i, ticker in enumerate(selected_tickers):
         progress.progress((i + 1) / len(selected_tickers), text=f"🔭 Scanning {ticker}...")
         df   = fetch_price_data(ticker)
-        ind  = compute_indicators(df)
+        ind  = compute_indicators(df, ticker)
         fund = fetch_fundamentals(ticker)
         if is_demo_mode():
             sig = mock_signal(ticker)
@@ -1910,7 +1956,12 @@ for item in results:
         else:
             signal_html = f'<div class="signal-text-none">— &nbsp; {signal_val}</div>'
 
-        conf_html = f'<div class="conf-stars">{stars(conf)}</div>' if conf > 0 else ""
+        if conf >= 6:
+            conf_html = f'<div class="conf-stars-max">{conf_stars_html(conf)}</div>'
+        elif conf > 0:
+            conf_html = f'<div class="conf-stars">{stars(conf)}</div>'
+        else:
+            conf_html = ""
 
         entry_html = ""
         if signal_val in ("BUY", "SELL") and sig.get("entry_zone"):
