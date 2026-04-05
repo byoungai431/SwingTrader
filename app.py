@@ -17,11 +17,25 @@ from fundamentals import fetch_fundamentals
 from history import (save_signal, get_history, dismiss_signal,
                       enter_position, get_my_open_positions,
                       get_my_position_history, close_my_position, get_conn,
-                      get_watchlist, save_watchlist)
+                      get_watchlist, save_watchlist,
+                      get_user_settings, save_user_settings)
 from config import WATCHLIST, ANTHROPIC_API_KEY
 from notify import send_exit_alert
 
 st.set_page_config(page_title="To The Moon", layout="wide", page_icon="🚀")
+
+# ── Position sizing (mirrors backtest config) ────────────────────────────────
+_SIZING_START_YEAR  = 1994   # year 1 of the model
+_SIZING_BASE        = 2_000  # $ per trade in year 1
+_SIZING_INCREMENT   = 300    # flat $ increase per subsequent year
+
+def get_trade_size(date_str) -> int:
+    """Return the model trade size for a given date, matching the backtest formula."""
+    try:
+        year = int(str(date_str)[:4])
+    except Exception:
+        year = _SIZING_START_YEAR
+    return _SIZING_BASE + _SIZING_INCREMENT * max(0, year - _SIZING_START_YEAR)
 
 # Auto-refresh every 2 minutes so new scan results appear without manual reload
 st_autorefresh(interval=2 * 60 * 1000, key="autorefresh")
@@ -902,12 +916,17 @@ def mock_signal(ticker):
 def _enter_position_dialog(ticker, signal_id, default_price, confidence, stop_loss, target, user_id):
     st.markdown(f"Set your fill price for **{ticker}**, then confirm.")
     price = st.number_input("Entry price ($)", min_value=0.01, value=float(default_price), step=0.01)
+    _settings = get_user_settings(user_id)
+    _default_amt = float(_settings.get("starting_balance") or 10_000) * 0.2  # 20% of balance as suggestion
+    amount = st.number_input("Amount to invest ($)", min_value=0.01, value=_default_amt, step=100.0,
+                             help="How much $ you're putting into this trade")
     c1, c2 = st.columns(2)
     with c1:
         if st.button("✅  Confirm", use_container_width=True, type="primary"):
             enter_position(
                 signal_id=signal_id, ticker=ticker, entry_price=price,
-                confidence=confidence, stop_loss=stop_loss, target=target, user_id=user_id,
+                confidence=confidence, stop_loss=stop_loss, target=target,
+                user_id=user_id, position_amount=amount,
             )
             st.toast(f"✅ {ticker} added to My Positions at ${price:.2f}")
             st.rerun()
@@ -921,6 +940,10 @@ def _enter_position_dialog(ticker, signal_id, default_price, confidence, stop_lo
 def _enter_position_manual_dialog(ticker, default_price, user_id):
     st.markdown(f"Track your own position in **{ticker}**.")
     price = st.number_input("Entry price ($)", min_value=0.01, value=float(default_price), step=0.01)
+    _settings = get_user_settings(user_id)
+    _default_amt = float(_settings.get("starting_balance") or 10_000) * 0.2
+    amount = st.number_input("Amount to invest ($)", min_value=0.01, value=_default_amt, step=100.0,
+                             help="How much $ you're putting into this trade")
     col_sl, col_tp = st.columns(2)
     with col_sl:
         stop_loss = st.number_input("Stop loss ($)", min_value=0.0, value=0.0, step=0.01,
@@ -936,7 +959,7 @@ def _enter_position_manual_dialog(ticker, default_price, user_id):
                 confidence=0,
                 stop_loss=stop_loss if stop_loss > 0 else None,
                 target=target if target > 0 else None,
-                user_id=user_id,
+                user_id=user_id, position_amount=amount,
             )
             st.toast(f"✅ {ticker} added to My Positions at ${price:.2f}")
             st.rerun()
@@ -1180,20 +1203,26 @@ def show_recommended_view(user_id=""):
             # Summary stats — P&L only counts closed trades
             wins = closed_count = 0
             total_pnl = 0.0
+            total_dollar_pnl = 0.0
             entered_wins = entered_closed = 0
             entered_pnl = 0.0
+            entered_dollar_pnl = 0.0
             entered_count = sum(1 for r in hist_rows if r["position_id"])
             passed_count  = sum(1 for r in hist_rows if not r["position_id"])
             for r in hist_rows:
                 if r["price"] and r["exit_price"]:
                     pnl = (r["exit_price"] - r["price"]) / r["price"] * 100 if r["signal"] == "BUY" \
                           else (r["price"] - r["exit_price"]) / r["price"] * 100
+                    ts  = get_trade_size(r.get("date", ""))
+                    dollar_pnl = ts * pnl / 100
                     total_pnl += pnl
+                    total_dollar_pnl += dollar_pnl
                     closed_count += 1
                     if pnl >= 0:
                         wins += 1
                     if r["position_id"]:
                         entered_pnl += pnl
+                        entered_dollar_pnl += dollar_pnl
                         entered_closed += 1
                         if pnl >= 0:
                             entered_wins += 1
@@ -1207,6 +1236,12 @@ def show_recommended_view(user_id=""):
             ent_pnl_color  = "#39d98a" if entered_pnl >= 0 else "#ff6b6b"
             ent_avg_color  = "#39d98a" if entered_avg >= 0 else "#ff6b6b"
             ent_wr_color   = "#39d98a" if entered_wr  >= 50 else "#ff6b6b"
+            dollar_color   = "#39d98a" if total_dollar_pnl >= 0 else "#ff6b6b"
+            ent_dollar_color = "#39d98a" if entered_dollar_pnl >= 0 else "#ff6b6b"
+
+            def _fmt_dollar(v):
+                sign = "+" if v >= 0 else "-"
+                return f"{sign}${abs(v):,.0f}"
 
             st.markdown(
                 f'<div style="font-size:11px;color:#a090ff;letter-spacing:0.18em;text-transform:uppercase;'
@@ -1235,7 +1270,8 @@ def show_recommended_view(user_id=""):
                 f'</div>'
                 f'<div class="fund-card" style="flex:1;min-width:80px;">'
                 f'<div class="fund-card-label">Total P&amp;L</div>'
-                f'<div class="fund-card-value" style="color:{pnl_color};">{total_pnl:+.2f}%</div>'
+                f'<div class="fund-card-value" style="color:{dollar_color};">{_fmt_dollar(total_dollar_pnl)}</div>'
+                f'<div style="font-size:10px;color:#5050aa;margin-top:2px;">{total_pnl:+.1f}% sum</div>'
                 f'</div>'
                 f'</div>'
                 f'<div style="font-size:11px;color:#39d98a;letter-spacing:0.18em;text-transform:uppercase;'
@@ -1252,7 +1288,8 @@ def show_recommended_view(user_id=""):
                 f'</div>'
                 f'<div class="fund-card" style="flex:1;min-width:80px;border-color:#2a3a6a;">'
                 f'<div class="fund-card-label">Total P&amp;L</div>'
-                f'<div class="fund-card-value" style="color:{ent_pnl_color};">{entered_pnl:+.2f}%</div>'
+                f'<div class="fund-card-value" style="color:{ent_dollar_color};">{_fmt_dollar(entered_dollar_pnl)}</div>'
+                f'<div style="font-size:10px;color:#5050aa;margin-top:2px;">{entered_pnl:+.1f}% sum</div>'
                 f'</div>'
                 f'</div>',
                 unsafe_allow_html=True
@@ -1287,9 +1324,17 @@ def show_recommended_view(user_id=""):
                 if entry and exit_price:
                     pnl_pct   = (exit_price - entry) / entry * 100 if r["signal"] == "BUY" \
                                 else (entry - exit_price) / entry * 100
+                    ts        = get_trade_size(r.get("date", ""))
+                    dollar_pnl = ts * pnl_pct / 100
                     pnl_color = "#39d98a" if pnl_pct >= 0 else "#ff6b6b"
                     result_icon = "✅" if pnl_pct >= 0 else "❌"
-                    pnl_str   = f'<span style="color:{pnl_color};font-weight:700;font-size:20px;">{result_icon} {pnl_pct:+.2f}%</span>'
+                    d_sign = "+" if dollar_pnl >= 0 else "-"
+                    pnl_str   = (
+                        f'<span style="color:{pnl_color};font-weight:700;font-size:20px;">'
+                        f'{result_icon} {pnl_pct:+.2f}%</span>'
+                        f'<span style="color:{pnl_color};font-size:13px;font-weight:500;margin-left:6px;">'
+                        f'({d_sign}${abs(dollar_pnl):,.0f})</span>'
+                    )
                     try:
                         from datetime import date as _date
                         d0 = _date.fromisoformat(r["date"])
@@ -1409,7 +1454,17 @@ def show_positions_view(user_id=""):
                 if cur and entry:
                     pnl_pct   = (cur - entry) / entry * 100
                     pnl_color = "#39d98a" if pnl_pct >= 0 else "#ff6b6b"
-                    pnl_str   = f'<span style="color:{pnl_color};font-weight:700;">{pnl_pct:+.2f}%</span>'
+                    _pamt     = p.get("position_amount")
+                    if _pamt:
+                        _dpnl = _pamt * pnl_pct / 100
+                        _ds   = "+" if _dpnl >= 0 else "-"
+                        pnl_str = (
+                            f'<span style="color:{pnl_color};font-weight:700;">{pnl_pct:+.2f}%</span>'
+                            f'<span style="color:{pnl_color};font-size:12px;font-weight:500;margin-left:5px;">'
+                            f'({_ds}${abs(_dpnl):,.0f})</span>'
+                        )
+                    else:
+                        pnl_str = f'<span style="color:{pnl_color};font-weight:700;">{pnl_pct:+.2f}%</span>'
                     cur_str   = f"${cur:.2f}"
                 else:
                     pnl_str = '<span style="color:#5555aa;">—</span>'
@@ -1481,16 +1536,31 @@ def show_positions_view(user_id=""):
                 unsafe_allow_html=True
             )
         else:
-            wins = sum(1 for t in hist if t["exit_price"] and (t["exit_price"] - t["entry_price"]) / t["entry_price"] >= 0)
-            total_pnl = sum((t["exit_price"] - t["entry_price"]) / t["entry_price"] * 100
-                            for t in hist if t["exit_price"])
+            wins = 0
+            total_pnl = 0.0
+            total_dollar_pnl = 0.0
+            has_custom_amounts = False
+            for t in hist:
+                if t["exit_price"]:
+                    _p = (t["exit_price"] - t["entry_price"]) / t["entry_price"] * 100
+                    total_pnl += _p
+                    _amt = t.get("position_amount") or get_trade_size(t.get("entry_date", ""))
+                    if t.get("position_amount"):
+                        has_custom_amounts = True
+                    total_dollar_pnl += _amt * _p / 100
+                    if _p >= 0:
+                        wins += 1
             total = len(hist)
             win_rate = wins / total * 100 if total else 0
             avg_pnl  = total_pnl / total if total else 0
 
-            pnl_color = "#39d98a" if total_pnl >= 0 else "#ff6b6b"
+            pnl_color = "#39d98a" if total_dollar_pnl >= 0 else "#ff6b6b"
             avg_color = "#39d98a" if avg_pnl  >= 0 else "#ff6b6b"
             wr_color  = "#39d98a" if win_rate >= 50 else "#ff6b6b"
+
+            def _fmt_dollar(v):
+                sign = "+" if v >= 0 else "-"
+                return f"{sign}${abs(v):,.0f}"
 
             st.markdown(
                 f'<div style="display:flex;gap:16px;flex-wrap:wrap;margin:16px 0 24px 0;">'
@@ -1501,7 +1571,7 @@ def show_positions_view(user_id=""):
                 f'<div style="font-size:22px;font-weight:700;color:{avg_color};">{avg_pnl:+.1f}%</div>'
                 f'<div style="font-size:10px;color:#5050aa;letter-spacing:0.12em;text-transform:uppercase;margin-top:3px;">Avg P&amp;L</div></div>'
                 f'<div style="background:#0d0d2e;border:1px solid #2a1e78;border-radius:10px;padding:12px 20px;text-align:center;flex:1;min-width:90px;">'
-                f'<div style="font-size:22px;font-weight:700;color:{pnl_color};">{total_pnl:+.0f}%</div>'
+                f'<div style="font-size:22px;font-weight:700;color:{pnl_color};">{_fmt_dollar(total_dollar_pnl)}</div>'
                 f'<div style="font-size:10px;color:#5050aa;letter-spacing:0.12em;text-transform:uppercase;margin-top:3px;">Total P&amp;L</div></div>'
                 f'<div style="background:#0d0d2e;border:1px solid #2a1e78;border-radius:10px;padding:12px 20px;text-align:center;flex:1;min-width:90px;">'
                 f'<div style="font-size:22px;font-weight:700;color:#a090ff;">{total}</div>'
@@ -1514,10 +1584,13 @@ def show_positions_view(user_id=""):
                 entry = t["entry_price"]
                 ep    = t["exit_price"]
                 pnl   = (ep - entry) / entry * 100 if ep else 0
+                ts    = t.get("position_amount") or get_trade_size(t.get("entry_date", ""))
+                dollar_pnl = ts * pnl / 100 if ep else None
                 pnl_color = "#39d98a" if pnl >= 0 else "#ff6b6b"
                 conf  = int(t.get("confidence") or 0)
                 conf_html = conf_stars_html(conf)
                 sig_badge = badge("▲ BUY", "green")
+                dollar_str = f' <span style="font-size:13px;font-weight:500;">({_fmt_dollar(dollar_pnl)})</span>' if dollar_pnl is not None else ""
 
                 st.markdown(
                     f'<div class="panel" style="margin-bottom:6px;">'
@@ -1542,7 +1615,7 @@ def show_positions_view(user_id=""):
                     f'</div>'
                     f'<div style="min-width:100px;">'
                     f'<div style="font-size:9px;color:#5555aa;letter-spacing:0.12em;text-transform:uppercase;margin-bottom:3px;">Result</div>'
-                    f'<div style="font-size:17px;font-weight:700;color:{pnl_color};">{pnl:+.2f}%</div>'
+                    f'<div style="font-size:17px;font-weight:700;color:{pnl_color};">{pnl:+.2f}%{dollar_str}</div>'
                     f'</div>'
                     f'{"<div style=min-width:120px;><div style=font-size:9px;color:#5555aa;letter-spacing:0.12em;text-transform:uppercase;margin-bottom:3px;>Exit Reason</div><div style=font-size:13px;color:#8888bb;>" + (t.get("exit_reason") or "—") + "</div></div>" if t.get("exit_reason") else ""}'
                     f'</div>'
@@ -1720,6 +1793,22 @@ with st.sidebar.expander("⚙️  Manage Watchlist", expanded=False):
         f'{len(st.session_state.watchlist)} stocks tracked</div>',
         unsafe_allow_html=True
     )
+
+st.sidebar.divider()
+
+with st.sidebar.expander("💰  Account Settings", expanded=False):
+    _s = get_user_settings(user_id)
+    _bal = st.number_input(
+        "Starting balance ($)",
+        min_value=100.0, max_value=10_000_000.0,
+        value=float(_s.get("starting_balance") or 10_000),
+        step=500.0,
+        help="Used to suggest default trade sizes when entering positions",
+        key="sidebar_starting_balance",
+    )
+    if st.button("Save", key="save_account_settings", use_container_width=True):
+        save_user_settings(user_id, _bal)
+        st.toast("✅ Settings saved")
 
 st.sidebar.divider()
 

@@ -69,6 +69,14 @@ def init_db():
             """)
             # Per-user columns / tables (safe to run on every startup)
             cur.execute("ALTER TABLE positions ADD COLUMN IF NOT EXISTS user_id TEXT")
+            cur.execute("ALTER TABLE positions ADD COLUMN IF NOT EXISTS position_amount REAL")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS user_settings (
+                    user_id          TEXT PRIMARY KEY,
+                    starting_balance REAL    DEFAULT 10000,
+                    updated_at       TEXT    DEFAULT NOW()::text
+                )
+            """)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS signal_dismissals (
                     signal_id    INTEGER NOT NULL,
@@ -217,9 +225,42 @@ def dismiss_signal(signal_id: int, user_id: str):
 
 # ── My Positions ───────────────────────────────────────────────────────────────
 
+def get_user_settings(user_id: str) -> dict:
+    """Return the user's settings dict. Creates a default row if none exists."""
+    init_db()
+    conn = get_conn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM user_settings WHERE user_id = %s", (user_id,))
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if row:
+        return dict(row)
+    return {"user_id": user_id, "starting_balance": 10_000.0}
+
+
+def save_user_settings(user_id: str, starting_balance: float):
+    init_db()
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO user_settings (user_id, starting_balance, updated_at)
+                VALUES (%s, %s, NOW()::text)
+                ON CONFLICT (user_id) DO UPDATE
+                    SET starting_balance = EXCLUDED.starting_balance,
+                        updated_at = EXCLUDED.updated_at
+            """, (user_id, starting_balance))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def enter_position(signal_id: int | None, ticker: str, entry_price: float,
                    confidence: int, stop_loss: str | None, target: str | None,
-                   user_id: str = "", notes: str | None = None) -> int:
+                   user_id: str = "", notes: str | None = None,
+                   position_amount: float | None = None) -> int:
     """Record a trade the user manually entered. Returns the new position id."""
     init_db()
     today = datetime.now().strftime("%Y-%m-%d")
@@ -229,11 +270,11 @@ def enter_position(signal_id: int | None, ticker: str, entry_price: float,
             cur.execute("""
                 INSERT INTO positions
                     (signal_id, ticker, entry_date, entry_price, confidence,
-                     stop_loss, target, notes, user_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     stop_loss, target, notes, user_id, position_amount)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
             """, (signal_id, ticker, today, entry_price, confidence,
-                  stop_loss, target, notes, user_id))
+                  stop_loss, target, notes, user_id, position_amount))
             new_id = cur.fetchone()[0]
         conn.commit()
         return new_id
@@ -247,7 +288,7 @@ def get_my_open_positions(user_id: str = "") -> list[dict]:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
                 SELECT id, signal_id, ticker, entry_date, entry_price,
-                       confidence, stop_loss, target, notes
+                       confidence, stop_loss, target, notes, position_amount
                 FROM positions
                 WHERE exit_date IS NULL AND user_id = %s
                 ORDER BY entry_date DESC
@@ -264,7 +305,8 @@ def get_my_position_history(user_id: str = "", limit: int = 50) -> list[dict]:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
                 SELECT id, ticker, entry_date, entry_price, confidence,
-                       stop_loss, target, exit_price, exit_date, exit_reason, notes
+                       stop_loss, target, exit_price, exit_date, exit_reason,
+                       notes, position_amount
                 FROM positions
                 WHERE exit_date IS NOT NULL AND user_id = %s
                 ORDER BY exit_date DESC
