@@ -29,9 +29,10 @@ USE_SP500 = True
 
 # ── Exit parameters (mirrors backtest.py config) ───────────────────────────────
 FLOOR_5STAR    = 0.10  # Exit 5★ if trade drops this % from entry (0 = disabled)
-MAX_HOLD_DAYS  = 30    # Trading-day hold limit for 3★/4★ trades
+MAX_HOLD_DAYS  = 30    # Trading-day hold limit for 4★ trades
 MAX_HOLD_5STAR = 35    # Trading-day hold limit for 5★ trades
 STALE_CUT_DAYS = 12    # Exit after N trading days if gain < 0% (0 = disabled; 5★ exempt)
+IBS_MIN_EXIT   = 0.80  # Exit 5★/5★ MAX when IBS (close near day's high) exceeds this
 
 # ── 5★ Consecutive Loss Cooldown ───────────────────────────────────────────────
 CONSEC_5STAR_LOSS_LIMIT   = 4   # Pause 5★ entries after this many consecutive losses
@@ -168,25 +169,36 @@ def _get_open_positions() -> list[dict]:
     current_rsi = {}
     try:
         raw = yf.download(tickers, period="3mo", progress=False, auto_adjust=True)
+        current_ibs = {}
         if len(tickers) == 1:
             try:
                 close = raw["Close"].dropna()
+                high  = raw["High"].dropna()
+                low   = raw["Low"].dropna()
                 current_prices[tickers[0]] = float(close.iloc[-1])
                 delta = close.diff()
                 gain = delta.clip(lower=0).ewm(com=13, min_periods=14).mean()
                 loss = (-delta.clip(upper=0)).ewm(com=13, min_periods=14).mean()
                 current_rsi[tickers[0]] = round(float(100 - 100 / (1 + gain / loss)).iloc[-1], 2)
+                rng = float(high.iloc[-1]) - float(low.iloc[-1])
+                if rng > 0:
+                    current_ibs[tickers[0]] = round((float(close.iloc[-1]) - float(low.iloc[-1])) / rng, 3)
             except Exception:
                 pass
         else:
             for t in tickers:
                 try:
                     close = raw["Close"][t].dropna()
+                    high  = raw["High"][t].dropna()
+                    low   = raw["Low"][t].dropna()
                     current_prices[t] = float(close.iloc[-1])
                     delta = close.diff()
                     gain = delta.clip(lower=0).ewm(com=13, min_periods=14).mean()
                     loss = (-delta.clip(upper=0)).ewm(com=13, min_periods=14).mean()
                     current_rsi[t] = round(float(100 - 100 / (1 + gain / loss)).iloc[-1], 2)
+                    rng = float(high.iloc[-1]) - float(low.iloc[-1])
+                    if rng > 0:
+                        current_ibs[t] = round((float(close.iloc[-1]) - float(low.iloc[-1])) / rng, 3)
                 except Exception:
                     pass
     except Exception:
@@ -196,6 +208,7 @@ def _get_open_positions() -> list[dict]:
         cur = current_prices.get(p["ticker"])
         p["current_price"] = cur
         p["current_rsi"] = current_rsi.get(p["ticker"])
+        p["current_ibs"] = current_ibs.get(p["ticker"])
         entry = p.get("price") or 0
         if cur and entry:
             p["unrealized_pnl"] = (cur - entry) / entry * 100
@@ -225,17 +238,22 @@ def _check_stop_target_hits(open_positions: list[dict]) -> list[dict]:
         elif target and cur >= target:
             hit_type = "TARGET"
 
-        # 5★ floor stop: exit if down FLOOR_5STAR% from entry (5★ have no regular stop)
-        if hit_type is None and conf == 5 and FLOOR_5STAR > 0 and entry:
+        # 5★/5★ MAX floor stop: exit if down FLOOR_5STAR% from entry
+        if hit_type is None and conf >= 5 and FLOOR_5STAR > 0 and entry:
             if cur <= entry * (1 - FLOOR_5STAR):
                 hit_type = "FLOOR_5STAR"
 
-        # 5★ RSI momentum exit: exit when RSI > 72 (mirrors backtest RSI_5STAR_EXIT)
+        # 5★/5★ MAX RSI momentum exit: exit when RSI > 72 (mirrors backtest RSI_5STAR_EXIT)
         rsi_now = p.get("current_rsi")
-        if hit_type is None and conf == 5 and rsi_now is not None and rsi_now > 72:
+        if hit_type is None and conf >= 5 and rsi_now is not None and rsi_now > 72:
             hit_type = "RSI_EXIT"
 
-        # Max hold: exit after N trading days (30 for 3★/4★, 35 for 5★)
+        # 5★/5★ MAX IBS exit: close near day's high = mean-reversion exhausted (only if profitable)
+        ibs_now = p.get("current_ibs")
+        if hit_type is None and conf >= 5 and ibs_now is not None and ibs_now > IBS_MIN_EXIT and cur > entry:
+            hit_type = "IBS_EXIT"
+
+        # Max hold: exit after N trading days (30 for 4★, 35 for 5★)
         if hit_type is None and entry and p.get("date"):
             try:
                 days_held = len(pd.bdate_range(str(p["date"])[:10], today))
@@ -246,7 +264,7 @@ def _check_stop_target_hits(open_positions: list[dict]) -> list[dict]:
                 pass
 
         # Stale cut: exit after STALE_CUT_DAYS if gain < 0% (5★ exempt)
-        if hit_type is None and conf != 5 and entry and p.get("date") and STALE_CUT_DAYS > 0:
+        if hit_type is None and conf < 5 and entry and p.get("date") and STALE_CUT_DAYS > 0:
             try:
                 days_held = len(pd.bdate_range(str(p["date"])[:10], today))
                 if days_held >= STALE_CUT_DAYS and cur < entry:
@@ -262,6 +280,7 @@ def _check_stop_target_hits(open_positions: list[dict]) -> list[dict]:
                 "STOP":        "Stop loss hit",
                 "FLOOR_5STAR": f"Floor stop hit (-{int(FLOOR_5STAR * 100)}%)",
                 "RSI_EXIT":    f"RSI momentum exit (RSI {rsi_now:.1f} > 72)" if rsi_now is not None else "RSI momentum exit",
+                "IBS_EXIT":    f"IBS exit (IBS {ibs_now:.2f} > {IBS_MIN_EXIT}) — mean-reversion exhausted" if ibs_now is not None else "IBS exit",
                 "MAX_HOLD":    "Max hold reached",
                 "STALE_CUT":   f"Stale cut (no gain after {STALE_CUT_DAYS}d)",
             }

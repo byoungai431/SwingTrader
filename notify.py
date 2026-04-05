@@ -403,6 +403,80 @@ def send_telegram(signals: list[dict]) -> bool:
         return False
 
 
+# ── End-of-day Telegram summary (4★/5★ only) ─────────────────────────────────
+
+def send_daily_telegram(signals: list[dict]) -> bool:
+    """Send an end-of-day Telegram summary for 4★/5★ signals only.
+
+    Always sends — if no qualifying signals, explicitly states so.
+    """
+    if not TELEGRAM_ENABLED:
+        return False
+
+    high_conf = [s for s in signals if (s.get("confidence") or 0) >= 4]
+    buys  = [s for s in high_conf if s.get("signal") == "BUY"]
+    sells = [s for s in high_conf if s.get("signal") == "SELL"]
+
+    def _esc(v):
+        return html.escape(str(v)) if v else ""
+
+    date  = datetime.now().strftime("%b %d, %Y · %I:%M %p")
+    lines = [
+        "⭐ <b>SWINGTRADER DAILY SUMMARY</b>",
+        f"<i>{date}</i>",
+        "<i>4★ + 5★ signals only</i>",
+        "",
+    ]
+
+    if not buys and not sells:
+        lines.append("📭 No 4★ or 5★ signals today.")
+    else:
+        if buys:
+            lines.append(f"🚀 <b>BUY ({len(buys)})</b>")
+            for s in buys:
+                conf  = s.get("confidence", 0) or 0
+                stars = "★" * conf + "☆" * (5 - conf)
+                price = f"${s.get('price', 0):.2f}"
+                lines.append(f"  <b>{_esc(s['ticker'])}</b>  {stars}  {price}")
+                lines.append(f"  Stop: {_esc(s.get('stop_loss', '—'))}  |  Target: {_esc(s.get('target', '—'))}")
+                if s.get("rationale"):
+                    lines.append(f"  <i>{_esc(s['rationale'][:160])}</i>")
+                lines.append("")
+
+        if sells:
+            lines.append(f"🔻 <b>SELL ({len(sells)})</b>")
+            for s in sells:
+                conf  = s.get("confidence", 0) or 0
+                stars = "★" * conf + "☆" * (5 - conf)
+                price = f"${s.get('price', 0):.2f}"
+                lines.append(f"  <b>{_esc(s['ticker'])}</b>  {stars}  {price}")
+                if s.get("rationale"):
+                    lines.append(f"  <i>{_esc(s['rationale'][:160])}</i>")
+                lines.append("")
+
+    text    = "\n".join(lines).strip()
+    payload = json.dumps({
+        "chat_id":    TELEGRAM_CHAT_ID,
+        "text":       text,
+        "parse_mode": "HTML",
+    }).encode("utf-8")
+
+    try:
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            resp.read()
+        print(f"  ✈️  Daily Telegram summary sent → chat {TELEGRAM_CHAT_ID}")
+        return True
+    except Exception as e:
+        print(f"  ✈️  Daily Telegram FAILED: {e}")
+        return False
+
+
 # ── Stop/target exit alerts ───────────────────────────────────────────────────
 
 def send_exit_alert(hits: list[dict]) -> bool:
@@ -419,6 +493,10 @@ def send_exit_alert(hits: list[dict]) -> bool:
     for h in hits:
         if h["hit_type"] == "TARGET":
             icon, label = "🎯", "Target hit"
+        elif h["hit_type"] == "IBS_EXIT":
+            icon, label = "📈", "IBS exit — mean-reversion exhausted"
+        elif h["hit_type"] == "RSI_EXIT":
+            icon, label = "📊", "RSI momentum exit"
         elif h["hit_type"] == "MANUAL":
             icon, label = "🤚", "Manually closed (model still tracking)"
         else:

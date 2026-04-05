@@ -78,17 +78,26 @@ def stars(n):
         return "★★★★★ MAX"
     return "★" * n + "☆" * (5 - n)
 def conf_stars_html(n):
-    """Return HTML star display; confidence=6 renders as golden '5★ MAX'."""
+    """Return HTML star display; confidence=6 renders as shiny blue '5★ MAX'."""
     n = int(n)
     if n >= 6:
         return (
-            '<span style="color:#FFD700;font-weight:800;letter-spacing:2px;'
-            'text-shadow:0 0 12px rgba(255,215,0,0.9);">★★★★★</span>'
-            '<span style="color:#FFD700;font-size:0.70em;font-weight:900;'
-            'letter-spacing:0.12em;text-shadow:0 0 12px rgba(255,215,0,0.9);'
+            '<span style="color:#40E0FF;font-weight:800;letter-spacing:2px;'
+            'text-shadow:0 0 8px rgba(64,224,255,1.0),0 0 20px rgba(0,191,255,0.7);">★★★★★</span>'
+            '<span style="color:#40E0FF;font-size:0.70em;font-weight:900;'
+            'letter-spacing:0.12em;text-shadow:0 0 8px rgba(64,224,255,1.0),0 0 20px rgba(0,191,255,0.7);'
             'margin-left:5px;">MAX</span>'
         )
-    return "★" * n + "☆" * (5 - n)
+    filled = "★" * n + "☆" * (5 - n)
+    if n == 5:
+        color = "#f9c846"  # gold
+    elif n == 4:
+        color = "#a8a8c0"  # silver
+    elif n == 3:
+        color = "#cd7f32"  # bronze
+    else:
+        color = "#ffffff"
+    return f'<span style="color:{color};font-weight:700;">{filled}</span>'
 
 
 # ── Global CSS ─────────────────────────────────────────────────────────────────
@@ -419,8 +428,8 @@ section[data-testid="stSidebar"] .stButton.home-btn > button:hover {
 .signal-text-buy  { color:#39d98a; font-size:30px; font-weight:800; text-shadow:0 0 20px rgba(57,217,138,0.65); letter-spacing:0.06em; }
 .signal-text-sell { color:#ff6b6b; font-size:30px; font-weight:800; text-shadow:0 0 20px rgba(255,107,107,0.65); letter-spacing:0.06em; }
 .signal-text-none { color:#aaaacc; font-size:22px; font-weight:700; }
-.conf-stars       { font-size:22px; letter-spacing:4px; margin:8px 0; color:#f9c846; text-shadow:0 0 14px rgba(249,200,70,0.75); }
-.conf-stars-max   { font-size:22px; letter-spacing:2px; margin:8px 0; color:#FFD700; font-weight:800; text-shadow:0 0 18px rgba(255,215,0,1.0), 0 0 30px rgba(255,180,0,0.6); }
+.conf-stars       { font-size:22px; letter-spacing:4px; margin:8px 0; }
+.conf-stars-max   { font-size:22px; letter-spacing:2px; margin:8px 0; color:#40E0FF; font-weight:800; text-shadow:0 0 10px rgba(64,224,255,1.0), 0 0 28px rgba(0,191,255,0.8), 0 0 50px rgba(0,140,255,0.4); }
 .rationale        { font-size:13px; color:#c8c8e8; line-height:1.80; margin-top:10px; }
 
 /* ── Range ── */
@@ -951,8 +960,8 @@ def _render_signal_cards(rows, current_prices, user_id=""):
         if not section_rows:
             continue
         is_max_section = section_label == "5-Star MAX Signals"
-        hdr_color  = "#FFD700" if is_max_section else "#8888bb"
-        hdr_border = "#3a2e00" if is_max_section else "#1c1c4a"
+        hdr_color  = "#40E0FF" if is_max_section else "#8888bb"
+        hdr_border = "#003a4a" if is_max_section else "#1c1c4a"
         st.markdown(
             f'<div style="font-size:11px;color:{hdr_color};letter-spacing:0.20em;text-transform:uppercase;'
             f'margin:24px 0 12px 0;padding-bottom:8px;border-bottom:1px solid {hdr_border};">'
@@ -1005,7 +1014,7 @@ def _render_signal_cards(rows, current_prices, user_id=""):
                 f'{staleness_html}'
                 f'</div>'
                 f'<div style="display:flex;gap:8px;align-items:center;">'
-                f'<span style="color:#ffd700;font-size:16px;letter-spacing:2px;">{conf_html}</span>'
+                f'<span style="font-size:16px;letter-spacing:2px;">{conf_html}</span>'
                 f'{sig_badge}'
                 f'</div>'
                 f'</div>'
@@ -1077,15 +1086,6 @@ def show_recommended_view(user_id=""):
     st.markdown(
         '<div style="text-align:center;padding:30px 0 20px 0;">'
         '<div class="anim-shimmer" style="font-size:38px;font-weight:900;letter-spacing:0.06em;">⭐ Recommended</div>'
-        '<div style="margin-top:16px;display:inline-flex;align-items:center;gap:4px;'
-        'background:rgba(255,255,255,0.03);border:1px solid #1c1c4a;border-radius:20px;'
-        'padding:6px 14px;">'
-        '<span style="font-size:9px;color:#8888bb;letter-spacing:0.18em;text-transform:uppercase;font-weight:700;margin-right:8px;">Tiers</span>'
-        '<span style="font-size:13px;margin-right:2px;">🥉</span><span style="color:#cd7f32;font-size:10px;font-weight:700;margin-right:10px;">3★</span>'
-        '<span style="font-size:13px;margin-right:2px;">🥈</span><span style="color:#a0a0c0;font-size:10px;font-weight:700;margin-right:10px;">4★</span>'
-        '<span style="font-size:13px;margin-right:2px;">🥇</span><span style="color:#f9c846;font-size:10px;font-weight:700;margin-right:10px;">5★</span>'
-        '<span style="font-size:13px;margin-right:2px;">💎</span><span style="color:#FFD700;font-size:10px;font-weight:900;text-shadow:0 0 6px rgba(255,215,0,0.6);">5★ MAX</span>'
-        '</div>'
         '</div>',
         unsafe_allow_html=True
     )
@@ -1311,7 +1311,7 @@ def show_recommended_view(user_id=""):
                     f'</div>'
                     f'<div style="display:flex;gap:8px;align-items:center;">'
                     f'{status_badge}'
-                    f'<span style="color:#ffd700;font-size:16px;letter-spacing:2px;">{conf_html}</span>'
+                    f'<span style="font-size:16px;letter-spacing:2px;">{conf_html}</span>'
                     f'{sig_badge}'
                     f'</div>'
                     f'</div>'
@@ -1422,7 +1422,7 @@ def show_positions_view(user_id=""):
                     f'<span style="font-size:24px;font-weight:900;color:#c0c0ff;">{p["ticker"]}</span>'
                     f'<span style="font-size:12px;color:#44447a;margin-left:12px;">Entered: {p["entry_date"]}</span>'
                     f'</div>'
-                    f'<span style="color:#ffd700;font-size:16px;letter-spacing:2px;">{conf_html}</span>'
+                    f'<span style="font-size:16px;letter-spacing:2px;">{conf_html}</span>'
                     f'</div>'
                     f'<div style="display:flex;gap:20px;flex-wrap:wrap;">'
                     f'<div style="min-width:70px;">'
@@ -1527,7 +1527,7 @@ def show_positions_view(user_id=""):
                     f'<span style="font-size:12px;color:#44447a;margin-left:12px;">{t["entry_date"]} → {t["exit_date"]}</span>'
                     f'</div>'
                     f'<div style="display:flex;gap:8px;align-items:center;">'
-                    f'<span style="color:#ffd700;font-size:16px;letter-spacing:2px;">{conf_html}</span>'
+                    f'<span style="font-size:16px;letter-spacing:2px;">{conf_html}</span>'
                     f'{sig_badge}'
                     f'</div>'
                     f'</div>'
@@ -1617,10 +1617,6 @@ st.sidebar.markdown(
     '<div style="font-size:9px;color:#8888bb;letter-spacing:0.22em;text-transform:uppercase;margin-bottom:8px;text-align:center;">Trade Tiers</div>'
     '<div style="display:flex;flex-direction:column;gap:5px;">'
     '<div style="display:flex;align-items:center;gap:8px;padding:4px 8px;border-radius:8px;background:rgba(255,255,255,0.03);">'
-    '<span style="font-size:14px;">🥉</span>'
-    '<span style="color:#cd7f32;font-size:11px;font-weight:700;">3★</span>'
-    '</div>'
-    '<div style="display:flex;align-items:center;gap:8px;padding:4px 8px;border-radius:8px;background:rgba(255,255,255,0.03);">'
     '<span style="font-size:14px;">🥈</span>'
     '<span style="color:#a0a0c0;font-size:11px;font-weight:700;">4★</span>'
     '</div>'
@@ -1628,9 +1624,9 @@ st.sidebar.markdown(
     '<span style="font-size:14px;">🥇</span>'
     '<span style="color:#f9c846;font-size:11px;font-weight:700;">5★</span>'
     '</div>'
-    '<div style="display:flex;align-items:center;gap:8px;padding:4px 8px;border-radius:8px;background:rgba(255,215,0,0.05);border:1px solid rgba(255,215,0,0.15);">'
+    '<div style="display:flex;align-items:center;gap:8px;padding:4px 8px;border-radius:8px;background:rgba(64,224,255,0.05);border:1px solid rgba(64,224,255,0.2);">'
     '<span style="font-size:14px;">💎</span>'
-    '<span style="color:#FFD700;font-size:11px;font-weight:900;text-shadow:0 0 6px rgba(255,215,0,0.6);">5★ MAX</span>'
+    '<span style="color:#40E0FF;font-size:11px;font-weight:900;text-shadow:0 0 8px rgba(64,224,255,0.9),0 0 16px rgba(0,191,255,0.6);">5★ MAX</span>'
     '</div>'
     '</div>'
     '</div>',
@@ -1747,14 +1743,16 @@ st.markdown(
     '<div class="anim-float" style="font-size:50px;-webkit-filter:drop-shadow(0 0 18px rgba(220,230,255,0.7));filter:drop-shadow(0 0 18px rgba(220,230,255,0.7));">🌙</div>'
     '</div>'
     '<div class="anim-shimmer" style="font-size:48px;font-weight:900;letter-spacing:0.06em;margin:4px 0 8px 0;line-height:1.1;">To The Moon</div>'
+    '<div style="display:flex;align-items:center;justify-content:center;gap:10px;">'
     '<div style="font-size:13px;color:#8888bb;letter-spacing:0.22em;text-transform:uppercase;">✦ &nbsp; AI-Powered Swing Trading Signals &nbsp; ✦</div>'
+    '<span style="font-size:10px;font-weight:800;color:#1a1a2e;background:#40E0FF;border-radius:6px;padding:2px 7px;letter-spacing:0.08em;">V2</span>'
+    '</div>'
     '<div style="margin-top:16px;display:inline-flex;align-items:center;gap:4px;'
     'background:rgba(255,255,255,0.03);border:1px solid #1c1c4a;border-radius:20px;padding:6px 16px;">'
     '<span style="font-size:9px;color:#8888bb;letter-spacing:0.18em;text-transform:uppercase;font-weight:700;margin-right:8px;">Tiers</span>'
-    '<span style="font-size:13px;margin-right:2px;">🥉</span><span style="color:#cd7f32;font-size:10px;font-weight:700;margin-right:10px;">3★</span>'
     '<span style="font-size:13px;margin-right:2px;">🥈</span><span style="color:#a0a0c0;font-size:10px;font-weight:700;margin-right:10px;">4★</span>'
     '<span style="font-size:13px;margin-right:2px;">🥇</span><span style="color:#f9c846;font-size:10px;font-weight:700;margin-right:10px;">5★</span>'
-    '<span style="font-size:13px;margin-right:2px;">💎</span><span style="color:#FFD700;font-size:10px;font-weight:900;text-shadow:0 0 6px rgba(255,215,0,0.6);">5★ MAX</span>'
+    '<span style="font-size:13px;margin-right:2px;">💎</span><span style="color:#40E0FF;font-size:10px;font-weight:900;text-shadow:0 0 8px rgba(64,224,255,0.9),0 0 16px rgba(0,191,255,0.6);">5★ MAX</span>'
     '</div>'
     '</div>',
     unsafe_allow_html=True
@@ -1902,7 +1900,7 @@ for item in results:
         if conf >= 6:
             conf_html = f'<div class="conf-stars-max">{conf_stars_html(conf)}</div>'
         elif conf > 0:
-            conf_html = f'<div class="conf-stars">{stars(conf)}</div>'
+            conf_html = f'<div class="conf-stars">{conf_stars_html(conf)}</div>'
         else:
             conf_html = ""
 
