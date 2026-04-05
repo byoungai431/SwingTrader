@@ -330,6 +330,11 @@ def run():
         print("ERROR: Set your Anthropic API key in config.py before running.")
         sys.exit(1)
 
+    # Weekend guard — markets are closed, nothing to scan
+    if datetime.now().weekday() >= 5:  # 5=Saturday, 6=Sunday
+        print(f"Weekend — skipping scan ({datetime.now().strftime('%A %Y-%m-%d')}).")
+        sys.exit(0)
+
     today    = datetime.now().strftime("%Y-%m-%d")
     universe = _get_sp500_tickers() if USE_SP500 else list(WATCHLIST)
     source   = f"S&P 500 ({len(universe)} stocks)" if USE_SP500 else f"Watchlist ({len(universe)} stocks)"
