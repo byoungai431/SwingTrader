@@ -1862,13 +1862,28 @@ for item in results:
 
     # Stock header
     if ind is None:
+        err_detail = sig.get("rationale", "Analysis failed.")
         st.markdown(
             f'<div class="stock-header">'
             f'<span style="font-size:24px;font-weight:900;color:#c0c0ff;">{ticker}</span>'
             f'</div>',
             unsafe_allow_html=True
         )
-        st.error(sig.get("rationale", "Analysis failed."))
+        st.markdown(
+            f'<div style="background:rgba(255,160,50,0.08);border:1px solid rgba(255,160,50,0.35);'
+            f'border-radius:10px;padding:16px 20px;margin-bottom:18px;">'
+            f'<div style="font-size:16px;font-weight:700;color:#ffb347;margin-bottom:6px;">'
+            f'⚠️ &nbsp; Could not compute indicators for {ticker}</div>'
+            f'<div style="font-size:13px;color:#d0c0a0;line-height:1.6;">'
+            f'This can happen during extreme market volatility when price data is incomplete or '
+            f'statistical calculations encounter unusual values. Try again in a few minutes, '
+            f'or check that the ticker symbol is valid.'
+            f'</div>'
+            f'<div style="font-size:11px;color:#887766;margin-top:8px;font-family:monospace;">'
+            f'{err_detail}</div>'
+            f'</div>',
+            unsafe_allow_html=True
+        )
         continue
 
     st.markdown(
