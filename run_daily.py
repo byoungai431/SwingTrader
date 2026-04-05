@@ -34,6 +34,13 @@ MAX_HOLD_5STAR = 35    # Trading-day hold limit for 5★ trades
 STALE_CUT_DAYS = 12    # Exit after N trading days if gain < 0% (0 = disabled; 5★ exempt)
 IBS_MIN_EXIT   = 0.80  # Exit 5★/5★ MAX when IBS (close near day's high) exceeds this
 
+# ── IBS Entry Filter (mirrors backtest IBS5s25_4s30 config) ───────────────────
+# Require today's bar to close near its LOW before entering — confirms deep
+# oversold exhaustion. Mirrors the optimized backtest's biggest quality driver.
+IBS_ENTRY_FILTER      = True  # Set False to disable
+IBS_MAX_ENTRY_5STAR   = 0.25  # 5★/5★ MAX: today's IBS must be below this
+IBS_MAX_ENTRY_4STAR   = 0.30  # 4★: today's IBS must be below this
+
 # ── 5★ Consecutive Loss Cooldown ───────────────────────────────────────────────
 CONSEC_5STAR_LOSS_LIMIT   = 4   # Pause 5★ entries after this many consecutive losses
 CONSEC_5STAR_COOLDOWN_DAYS = 10  # Calendar days to sit out before re-enabling 5★ entries
@@ -389,6 +396,23 @@ def run():
                 print(f"         ⏸  5★ cooldown active — skipping {ticker}")
                 signal = "NO TRADE"
                 sig["signal"] = "NO TRADE"
+
+            # IBS entry filter: today's bar must close near its low (deep oversold confirmation)
+            if signal == "BUY" and IBS_ENTRY_FILTER:
+                try:
+                    h = float(df["High"].iloc[-1])
+                    l = float(df["Low"].iloc[-1])
+                    c = float(df["Close"].iloc[-1])
+                    rng = h - l
+                    if rng > 0:
+                        today_ibs = (c - l) / rng
+                        threshold = IBS_MAX_ENTRY_5STAR if conf >= 5 else IBS_MAX_ENTRY_4STAR
+                        if today_ibs >= threshold:
+                            print(f"         🚫 IBS filter: IBS {today_ibs:.2f} ≥ {threshold} — skipping")
+                            signal = "NO TRADE"
+                            sig["signal"] = "NO TRADE"
+                except Exception:
+                    pass  # if IBS can't be computed, don't block the signal
 
             # SELL signals only apply to open BUY positions — skip if none exists
             if signal == "SELL":
