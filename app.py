@@ -1814,22 +1814,32 @@ if auto_run or selected_tickers != cached_tickers:
     progress = st.progress(0, text="📡 Establishing deep space connection...")
     for i, ticker in enumerate(selected_tickers):
         progress.progress((i + 1) / len(selected_tickers), text=f"🔭 Scanning {ticker}...")
-        df   = fetch_price_data(ticker)
-        ind  = compute_indicators(df, ticker)
-        fund = fetch_fundamentals(ticker)
-        if is_demo_mode():
-            sig = mock_signal(ticker)
-        else:
-            from signal_engine import get_signal
-            sig = get_signal(ticker, ind, fund)
-            # SELL signals only apply to open BUY positions — suppress if none exists
-            if sig["signal"] == "SELL":
-                open_buys = [p for p in get_my_open_positions(user_id) if p["ticker"] == ticker]
-                if not open_buys:
-                    sig["signal"] = "NO TRADE"
-            if sig["signal"] in ("BUY", "SELL"):
-                save_signal(ticker, sig, ind["latest_close"])
-        results.append({"ticker": ticker, "ind": ind, "sig": sig, "df": df, "fund": fund})
+        try:
+            df   = fetch_price_data(ticker)
+            ind  = compute_indicators(df, ticker)
+            fund = fetch_fundamentals(ticker)
+            if is_demo_mode():
+                sig = mock_signal(ticker)
+            else:
+                from signal_engine import get_signal
+                sig = get_signal(ticker, ind, fund)
+                # SELL signals only apply to open BUY positions — suppress if none exists
+                if sig["signal"] == "SELL":
+                    open_buys = [p for p in get_my_open_positions(user_id) if p["ticker"] == ticker]
+                    if not open_buys:
+                        sig["signal"] = "NO TRADE"
+                if sig["signal"] in ("BUY", "SELL"):
+                    save_signal(ticker, sig, ind["latest_close"])
+            results.append({"ticker": ticker, "ind": ind, "sig": sig, "df": df, "fund": fund})
+        except Exception as _scan_err:
+            results.append({
+                "ticker": ticker, "ind": None, "sig": {
+                    "ticker": ticker, "signal": "ERROR", "confidence_stars": 0,
+                    "rationale": f"Analysis failed: {_scan_err}",
+                    "strategies_aligned": [], "fundamentals_bonus": False,
+                    "entry_zone": None, "stop_loss": None, "target": None,
+                }, "df": None, "fund": None,
+            })
     progress.empty()
     st.session_state.results         = results
     st.session_state.results_tickers = selected_tickers
@@ -1851,6 +1861,16 @@ for item in results:
     fund   = item["fund"]
 
     # Stock header
+    if ind is None:
+        st.markdown(
+            f'<div class="stock-header">'
+            f'<span style="font-size:24px;font-weight:900;color:#c0c0ff;">{ticker}</span>'
+            f'</div>',
+            unsafe_allow_html=True
+        )
+        st.error(sig.get("rationale", "Analysis failed."))
+        continue
+
     st.markdown(
         f'<div class="stock-header">'
         f'<span style="font-size:24px;font-weight:900;color:#c0c0ff;">{ticker}</span>'

@@ -82,8 +82,10 @@ def compute_indicators(df: pd.DataFrame, ticker: str | None = None) -> dict:
 
     # Volume metrics
     volume = df["Volume"]
-    vol_today  = int(volume.iloc[-1])
-    vol_avg20  = int(volume.rolling(20).mean().iloc[-1]) if len(volume) >= 20 else vol_today
+    _vol_last = volume.iloc[-1]
+    vol_today  = int(_vol_last) if pd.notna(_vol_last) else 0
+    _vol_avg_raw = volume.rolling(20).mean().iloc[-1] if len(volume) >= 20 else None
+    vol_avg20  = int(_vol_avg_raw) if _vol_avg_raw is not None and pd.notna(_vol_avg_raw) else vol_today
     rel_vol    = round(vol_today / vol_avg20, 2) if vol_avg20 > 0 else 1.0
     vol_3d_avg = volume.iloc[-3:].mean()
     vol_trend  = "rising" if vol_3d_avg > vol_avg20 else "falling"
@@ -101,19 +103,36 @@ def compute_indicators(df: pd.DataFrame, ticker: str | None = None) -> dict:
     ACTIVE_BARS = 40
     patterns = []
     pattern_outcomes = {}
-    for detect_fn in [detect_double_bottom, detect_inv_head_shoulders, detect_cup_and_handle,
-                      detect_head_shoulders, detect_double_top]:
-        matches = detect_fn(df)
-        active = [m for m in matches if m.get("recency_bars", 999) <= ACTIVE_BARS]
-        if active:
-            pat = active[0]
-            patterns.append(pat)
-            outcomes = get_historical_outcomes(df, pat["pattern"])
-            if outcomes.get("total", 0) >= 1:
-                pattern_outcomes[pat["pattern"]] = outcomes
-    sr_levels = detect_support_resistance(df)
+    try:
+        for detect_fn in [detect_double_bottom, detect_inv_head_shoulders, detect_cup_and_handle,
+                          detect_head_shoulders, detect_double_top]:
+            try:
+                matches = detect_fn(df)
+                active = [m for m in matches if m.get("recency_bars", 999) <= ACTIVE_BARS]
+                if active:
+                    pat = active[0]
+                    patterns.append(pat)
+                    outcomes = get_historical_outcomes(df, pat["pattern"])
+                    if outcomes.get("total", 0) >= 1:
+                        pattern_outcomes[pat["pattern"]] = outcomes
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        sr_levels = detect_support_resistance(df)
+    except Exception:
+        sr_levels = []
 
     earnings = fetch_earnings_date(ticker) if ticker else {"earnings_date": None, "days_to_earnings": None}
+
+    # Previous-bar values — needed for rule-based signal engine
+    prev_close     = round(float(close.iloc[-2]), 2) if len(close) >= 2 else None
+    prev2_close    = round(float(close.iloc[-3]), 2) if len(close) >= 3 else None
+    prev_macd_hist = round(macd_obj.macd_diff().iloc[-2], 4) if len(close) >= 2 else None
+    prev_ma50      = round(close.rolling(50).mean().iloc[-2], 2) if len(close) >= 51 else None
+    prev_rsi       = round(rsi_series.iloc[-2], 2) if len(close) >= 2 else None
+    prev2_rsi      = round(rsi_series.iloc[-3], 2) if len(close) >= 3 else None
 
     return {
         "rsi": rsi,
@@ -122,15 +141,21 @@ def compute_indicators(df: pd.DataFrame, ticker: str | None = None) -> dict:
         "macd_signal": round(signal_line, 4),
         "macd_histogram": round(macd_histogram, 4),
         "macd_crossover": macd_crossover,
+        "prev_macd_hist": prev_macd_hist,
         "latest_close": round(float(close.iloc[-1]), 2),
+        "prev_close": prev_close,
+        "prev2_close": prev2_close,
         "latest_date": df.index[-1].strftime("%Y-%m-%d"),
         "week52_high": week52_high,
         "week52_high_date": week52_high_date,
         "week52_low": week52_low,
         "week52_low_date": week52_low_date,
         "ma50": ma50,
+        "prev_ma50": prev_ma50,
         "ma200": ma200,
         "golden_cross": golden_cross,
+        "prev_rsi": prev_rsi,
+        "prev2_rsi": prev2_rsi,
         "atr14": atr14,
         "vol_today": vol_today,
         "vol_avg20": vol_avg20,
