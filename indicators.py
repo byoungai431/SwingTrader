@@ -1,12 +1,35 @@
 import pandas as pd
 import ta
+import yfinance as yf
+from datetime import datetime
 from patterns import (detect_double_bottom, detect_inv_head_shoulders,
                       detect_cup_and_handle, detect_head_shoulders,
                       detect_double_top, detect_support_resistance,
                       get_historical_outcomes)
 
 
-def compute_indicators(df: pd.DataFrame) -> dict:
+def fetch_earnings_date(ticker: str) -> dict:
+    """Return the next earnings date and days until it for a given ticker."""
+    try:
+        cal = yf.Ticker(ticker).calendar
+        if cal is None:
+            return {"earnings_date": None, "days_to_earnings": None}
+        dates = cal.get("Earnings Date", []) if isinstance(cal, dict) else []
+        today = datetime.now().date()
+        future = []
+        for d in dates:
+            d = d.date() if hasattr(d, "date") else datetime.strptime(str(d)[:10], "%Y-%m-%d").date()
+            if d >= today:
+                future.append(d)
+        if not future:
+            return {"earnings_date": None, "days_to_earnings": None}
+        nearest = min(future)
+        return {"earnings_date": nearest.strftime("%Y-%m-%d"), "days_to_earnings": (nearest - today).days}
+    except Exception:
+        return {"earnings_date": None, "days_to_earnings": None}
+
+
+def compute_indicators(df: pd.DataFrame, ticker: str | None = None) -> dict:
     """
     Compute RSI and MACD for a given price DataFrame.
     Returns a dict of the latest indicator values.
@@ -65,6 +88,15 @@ def compute_indicators(df: pd.DataFrame) -> dict:
     vol_3d_avg = volume.iloc[-3:].mean()
     vol_trend  = "rising" if vol_3d_avg > vol_avg20 else "falling"
 
+    # Bollinger Bands (20-period, 2 std dev)
+    bb_mid_series = close.rolling(20).mean()
+    bb_std_series = close.rolling(20).std()
+    bb_upper = round((bb_mid_series + 2 * bb_std_series).iloc[-1], 2) if len(close) >= 20 else None
+    bb_lower = round((bb_mid_series - 2 * bb_std_series).iloc[-1], 2) if len(close) >= 20 else None
+    bb_middle = round(bb_mid_series.iloc[-1], 2) if len(close) >= 20 else None
+    _bb_range = (bb_upper - bb_lower) if (bb_upper and bb_lower and bb_upper != bb_lower) else None
+    bb_pct = round((float(close.iloc[-1]) - bb_lower) / _bb_range, 3) if _bb_range else None
+
     # Chart patterns — only currently forming (rightmost structural point ≤ 40 bars ago)
     ACTIVE_BARS = 40
     patterns = []
@@ -80,6 +112,8 @@ def compute_indicators(df: pd.DataFrame) -> dict:
             if outcomes.get("total", 0) >= 1:
                 pattern_outcomes[pat["pattern"]] = outcomes
     sr_levels = detect_support_resistance(df)
+
+    earnings = fetch_earnings_date(ticker) if ticker else {"earnings_date": None, "days_to_earnings": None}
 
     return {
         "rsi": rsi,
@@ -102,9 +136,15 @@ def compute_indicators(df: pd.DataFrame) -> dict:
         "vol_avg20": vol_avg20,
         "rel_vol": rel_vol,
         "vol_trend": vol_trend,
+        "bb_upper": bb_upper,
+        "bb_middle": bb_middle,
+        "bb_lower": bb_lower,
+        "bb_pct": bb_pct,
         "patterns": patterns,
         "pattern_outcomes": pattern_outcomes,
         "sr_levels": sr_levels,
+        "earnings_date": earnings["earnings_date"],
+        "days_to_earnings": earnings["days_to_earnings"],
     }
 
 

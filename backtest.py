@@ -27,8 +27,8 @@ os.makedirs(OUT_DIR, exist_ok=True)
 
 START_DATE  = "2015-01-01"
 END_DATE    = "2026-01-01"
-TRADE_SIZE       = 700     # $ per signal in the first year of the backtest
-TRADE_SIZE_GROWTH    = 0.50 # 50% size increase per subsequent year (multiplicative)
+TRADE_SIZE           = 700  # $ per signal in the first year of the backtest
+TRADE_SIZE_INCREMENT = 500  # flat $ increase per subsequent year
 STARTING_BALANCE = 4_000   # $ starting account balance
 POSITION_PCT     = 0.20    # fraction of account per trade (used only if compound mode re-enabled)
 COMMISSION    = 0.001      # 0.1% per side
@@ -66,13 +66,17 @@ RANDOM_SEED      = 42      # fixed seed for reproducibility
 
 # ── Entry Filters (new — toggle each independently to measure impact) ───────────
 RSI_ENTRY_MAX       = 40    # RSI must be below this at entry (baseline was 40)
-VOL_SPIKE_MIN       = 1.5   # Volume spike threshold
+VOL_SPIKE_MIN       = 1.5   # Volume spike threshold (standard gate)
 WEEKLY_TREND_FILTER = False # Only enter if price > 100-day MA (proxy for weekly trend up)
 RS_SPY_FILTER       = False # Only enter if stock's 5-day return > SPY's 5-day return
 EARNINGS_FILTER     = False # Skip signal if earnings date is within 5 calendar days of entry
 SPY_REGIME_5STAR    = False # Only allow 5★ entries when SPY is above its own 200-day MA (bull market gate)
 BEAR_MARKET_FILTER  = False # Block 3★/4★ entries when SPY closes below MA200 for N+ consecutive days (5★ still allowed)
 BEAR_MARKET_DAYS    = 5     # Number of consecutive days SPY must close below MA200 to trigger bear filter
+IBS_FILTER          = True  # Require prev-day IBS < threshold at entry; exit when IBS > IBS_MIN_EXIT
+IBS_MAX_ENTRY_5STAR = 0.25  # IBS entry threshold for 5★/5★ MAX trades (tight — deep oversold closes near low)
+IBS_MAX_ENTRY_4STAR = 0.30  # IBS entry threshold for 4★ trades (slightly wider — oversold but less extreme)
+IBS_MIN_EXIT        = 0.80  # Exit 5★ trades when IBS rises above this (mean-reversion exhaustion)
 
 # ── VIX Regime Filter ─────────────────────────────────────────────────────────
 # When VIX_FILTER = True, BUY entries are blocked on days VIX > VIX_FILTER_MAX.
@@ -173,6 +177,7 @@ def build_indicator_df(raw_df):
     df["vol_avg20"] = df["Volume"].rolling(20).mean()
     df["rel_vol"]   = df["Volume"] / df["vol_avg20"]
     df["ret5"]      = df["Close"].pct_change(5)         # 5-day return for RS vs SPY filter
+    df["ibs"]       = (df["Close"] - df["Low"]) / (df["High"] - df["Low"])  # Internal Bar Strength (0–1)
     bb_upper, bb_mid, bb_lower = _bollinger(df["Close"])
     df["bb_upper"]  = bb_upper
     df["bb_mid"]    = bb_mid
@@ -486,6 +491,12 @@ for ticker in TICKERS:
                     exit_price  = close
                     exit_reason = f"RSI Exit 5★ (>{RSI_5STAR_EXIT})"
 
+                # IBS exit: close near day's high = mean-reversion exhausted (5★ only, only if profitable)
+                if (exit_price is None and IBS_FILTER and position.get("is_5star", False) and
+                        current_gain > 0 and not pd.isna(row["ibs"]) and row["ibs"] > IBS_MIN_EXIT):
+                    exit_price  = close
+                    exit_reason = f"IBS Exit (>{IBS_MIN_EXIT})"
+
                 # 5★ soft floor: exit if trade drops FLOOR_5STAR% from entry
                 if (exit_price is None and position.get("is_5star", False) and
                         FLOOR_5STAR > 0 and current_gain <= -FLOOR_5STAR):
@@ -555,8 +566,9 @@ for ticker in TICKERS:
                 # 5★ path: RSI deep oversold with configurable delay
                 spy_bull  = not SPY_REGIME_5STAR or spy_regime.get(date, True)
                 vix_block = VIX_FILTER and vix_elevated.get(date, False)
+                ibs_block_5star = IBS_FILTER and (i == 0 or pd.isna(df["ibs"].iloc[i - 1]) or df["ibs"].iloc[i - 1] >= IBS_MAX_ENTRY_5STAR)
                 if (not pd.isna(row["rsi"]) and row["rsi"] < RSI_5STAR_ENTRY and bull_regime_now and spy_bull
-                        and not vix_block):
+                        and not vix_block and not ibs_block_5star):
                     if pending_5star == 0:
                         pending_5star = 1   # start delay clock — don't enter yet
                     else:
@@ -582,7 +594,7 @@ for ticker in TICKERS:
                             "trail_high":       close,
                             "strategies":       strat,
                             "confidence_stars": stars,
-                            "trade_size":       round(TRADE_SIZE * (1 + TRADE_SIZE_GROWTH) ** (date.year - int(START_DATE[:4]))),
+                            "trade_size":       round(TRADE_SIZE + TRADE_SIZE_INCREMENT * (date.year - int(START_DATE[:4]))),
                             "rsi_above_50":     False,
                             "rsi_above_70":     False,
                             "is_5star":         True,
@@ -592,6 +604,12 @@ for ticker in TICKERS:
                 else:
                     # 3★/4★ path: standard 3-of-4 gate (RSI >= RSI_5STAR_ENTRY)
                     sig = get_signal(df, i)
+
+                    # IBS filter: previous bar must close near its low (exhaustion confirmation)
+                    if sig == "BUY" and IBS_FILTER:
+                        prev_ibs = df["ibs"].iloc[i - 1] if i > 0 else float("nan")
+                        if pd.isna(prev_ibs) or prev_ibs >= IBS_MAX_ENTRY_4STAR:
+                            sig = None
 
                     # Bear market filter: block 3★/4★ entries when SPY below MA200 for 3+ days
                     if sig == "BUY" and BEAR_MARKET_FILTER and spy_bear_market.get(date, False):
@@ -616,6 +634,9 @@ for ticker in TICKERS:
 
                     if sig == "BUY":
                         stars  = confidence_count(df, i)
+                        # IBS-confirmed 3-of-4 promoted to 4★ (IBS replaces the missing condition)
+                        if IBS_FILTER and stars == 3:
+                            stars = 4
                         tp_pct = TP_PCT_4STAR if stars == 4 else TP_PCT_3STAR
                         stop   = close - ATR_MULT * atr
                         target = close * (1 + tp_pct)
@@ -628,7 +649,7 @@ for ticker in TICKERS:
                             "trail_high":       close,
                             "strategies":       strategy_labels(df, i, "BUY"),
                             "confidence_stars": stars,
-                            "trade_size":       round(TRADE_SIZE * (1 + TRADE_SIZE_GROWTH) ** (date.year - int(START_DATE[:4]))),
+                            "trade_size":       round(TRADE_SIZE + TRADE_SIZE_INCREMENT * (date.year - int(START_DATE[:4]))),
                             "rsi_above_50":     False,
                             "rsi_above_70":     False,
                             "is_5star":         False,
@@ -711,9 +732,10 @@ pf         = gross_win / gross_loss if gross_loss else 0
 by_reason = {}
 for t in all_trades:
     r = t["exit_reason"]
-    by_reason.setdefault(r, {"count": 0, "pnl": 0, "wins": 0})
-    by_reason[r]["count"] += 1
-    by_reason[r]["pnl"]   += t["pnl_dollar"]
+    by_reason.setdefault(r, {"count": 0, "pnl": 0, "wins": 0, "hold_days": 0})
+    by_reason[r]["count"]     += 1
+    by_reason[r]["pnl"]       += t["pnl_dollar"]
+    by_reason[r]["hold_days"] += t["hold_days"]
     if t["pnl_dollar"] > 0:
         by_reason[r]["wins"] += 1
 
@@ -793,13 +815,107 @@ for t in flat_trades_sorted:
     by_year_compound.setdefault(year, {"trades": 0, "pnl": 0.0, "start_balance": 0.0, "trade_size": 0})
     if by_year_compound[year]["trades"] == 0:
         by_year_compound[year]["start_balance"] = flat_balance - trade_pnl
-        by_year_compound[year]["trade_size"]     = round(TRADE_SIZE * (1 + TRADE_SIZE_GROWTH) ** (int(year) - int(START_DATE[:4])))
+        by_year_compound[year]["trade_size"]     = round(TRADE_SIZE + TRADE_SIZE_INCREMENT * (int(year) - int(START_DATE[:4])))
     by_year_compound[year]["trades"] += 1
     by_year_compound[year]["pnl"]    += trade_pnl
     by_year_compound[year]["end_balance"] = flat_balance
 compound_balance      = flat_balance
 total_compound_gain   = flat_balance - STARTING_BALANCE
 total_compound_return = total_compound_gain / STARTING_BALANCE * 100
+
+# ── Risk & performance metrics ─────────────────────────────────────────────────
+
+# 1. Max Drawdown (MDD) — track running balance per trade exit
+_balance_curve = []
+_running = float(STARTING_BALANCE)
+for t in flat_trades_sorted:
+    _running += t["pnl_dollar"]
+    _balance_curve.append(_running)
+
+_peak = float(STARTING_BALANCE)
+_mdd_pct = 0.0
+_mdd_dollar = 0.0
+_mdd_peak_bal = float(STARTING_BALANCE)
+_mdd_trough_bal = float(STARTING_BALANCE)
+for bal in _balance_curve:
+    if bal > _peak:
+        _peak = bal
+    dd_dollar = _peak - bal
+    dd_pct    = dd_dollar / _peak * 100 if _peak else 0
+    if dd_pct > _mdd_pct:
+        _mdd_pct       = dd_pct
+        _mdd_dollar    = dd_dollar
+        _mdd_peak_bal  = _peak
+        _mdd_trough_bal = bal
+
+# Recovery time from worst drawdown
+_in_recovery   = False
+_recovery_days = 0
+_peak2         = float(STARTING_BALANCE)
+_mdd2_pct      = 0.0
+_worst_dd_pct  = 0.0
+_recovery_trades = None
+_dd_start_idx    = None
+_dd_end_idx      = None
+for i, bal in enumerate(_balance_curve):
+    if bal > _peak2:
+        if _in_recovery:
+            _recovery_trades = i - _dd_end_idx
+            _in_recovery = False
+        _peak2 = bal
+    dd = (_peak2 - bal) / _peak2 * 100 if _peak2 else 0
+    if dd > _worst_dd_pct:
+        _worst_dd_pct = dd
+        _dd_end_idx   = i
+        _in_recovery  = True
+
+# 2. Avg win % / avg loss % (price-based)
+avg_win_pct  = sum(t["pnl_pct"] for t in wins)   / len(wins)   * 100 if wins   else 0
+avg_loss_pct = sum(t["pnl_pct"] for t in losses) / len(losses) * 100 if losses else 0
+rr_ratio     = abs(avg_win_pct / avg_loss_pct) if avg_loss_pct else 0
+
+# 3. CAGR
+_years = (pd.Timestamp(END_DATE) - pd.Timestamp(START_DATE)).days / 365.25
+cagr   = ((compound_balance / STARTING_BALANCE) ** (1 / _years) - 1) * 100 if _years > 0 else 0
+
+# Best / worst year
+_best_year  = max(by_year_compound.items(), key=lambda x: x[1]["pnl"])
+_worst_year = min(by_year_compound.items(), key=lambda x: x[1]["pnl"])
+
+# 4. Max consecutive losses & streak details
+_streak = 0
+_max_streak = 0
+_streak_start = None
+_max_streak_start = None
+_max_streak_end   = None
+for t in flat_trades_sorted:
+    if t["pnl_dollar"] <= 0:
+        if _streak == 0:
+            _streak_start = t["exit_date"]
+        _streak += 1
+        if _streak > _max_streak:
+            _max_streak       = _streak
+            _max_streak_start = _streak_start
+            _max_streak_end   = t["exit_date"]
+    else:
+        _streak = 0
+
+# 5. Sharpe & Sortino (annual, risk-free rate ~4.5% 2024 approximation → use 0 for simplicity)
+_annual_returns = []
+_prev_bal = float(STARTING_BALANCE)
+for year in sorted(by_year_compound.keys()):
+    end = by_year_compound[year]["end_balance"]
+    _annual_returns.append((end - _prev_bal) / _prev_bal * 100)
+    _prev_bal = end
+
+_rf = 0.0   # risk-free rate (0% for relative comparison)
+_mean_ret = sum(_annual_returns) / len(_annual_returns) if _annual_returns else 0
+_std_ret  = (sum((r - _mean_ret)**2 for r in _annual_returns) / len(_annual_returns)) ** 0.5 if len(_annual_returns) > 1 else 0
+sharpe    = (_mean_ret - _rf) / _std_ret if _std_ret else 0
+
+_down_rets   = [r for r in _annual_returns if r < 0]   # only negative years as downside
+_sortino_std = (sum(r**2 for r in _down_rets) / len(_annual_returns)) ** 0.5 if _down_rets else 0
+sortino      = (_mean_ret - _rf) / _sortino_std if _sortino_std else float("inf")
 
 # ── Write report ───────────────────────────────────────────────────────────────
 DIV  = "=" * 80
@@ -817,6 +933,7 @@ _5star_tag = f"5ST{RSI_5STAR_ENTRY}x{RSI_5STAR_EXIT}" + (f"D{RSI_5STAR_DELAY}" i
 _universe_tag = f"RAND{RANDOM_POOL_SIZE}s{RANDOM_SEED}" if USE_RANDOM_POOL else ("SP500" if USE_SP500 else "WL")
 if VIX_FILTER: _filter_parts.append(f"VIX{VIX_FILTER_MAX}")
 if BEAR_MARKET_FILTER: _filter_parts.append(f"BM{BEAR_MARKET_DAYS}d")
+if IBS_FILTER: _filter_parts.append(f"IBS5s{int(IBS_MAX_ENTRY_5STAR*100)}_4s{int(IBS_MAX_ENTRY_4STAR*100)}x{int(IBS_MIN_EXIT*100)}_P4")
 if CONSEC_5STAR_LOSS_LIMIT > 0: _filter_parts.append(f"5SCD{CONSEC_5STAR_LOSS_LIMIT}x{CONSEC_5STAR_COOLDOWN_DAYS}")
 RUN_TAG  = f"TP{TP_PCT_3STAR*100:g}-{TP_PCT_4STAR*100:g}-{TP_PCT_5STAR*100:g}pct_SL{ATR_MULT}_MH{MAX_HOLD}d_TT{TRAIL_TRIGGER*100:g}pct_TP{TRAIL_PCT*100:g}pct_BE{BREAKEVEN_TRIGGER*100:g}pct_{_5star_tag}_{'_'.join(_filter_parts)}_{_universe_tag}"
 OUT_FILE = os.path.join(OUT_DIR, f"backtest_{START_DATE}_{END_DATE}_{RUN_TAG}.txt")
@@ -827,7 +944,7 @@ lines += [
     "  TO THE MOON — Technical Backtest Report",
     f"  Period      : {START_DATE}  →  {END_DATE}",
     f"  Tickers     : {len(TICKERS)} {'random non-S&P500 (seed=' + str(RANDOM_SEED) + ')' if USE_RANDOM_POOL else 'S&P 500' if USE_SP500 else 'watchlist'} stocks",
-    f"  Trade Size  : ${TRADE_SIZE:,} (year 1), ×{1+TRADE_SIZE_GROWTH:.0%}/year thereafter",
+    f"  Trade Size  : ${TRADE_SIZE:,} (year 1), +${TRADE_SIZE_INCREMENT:,}/year flat thereafter",
     f"  Stop-Loss   : {ATR_MULT}× ATR14 from entry",
     f"  Trailing Stop: {TRAIL_TRIGGER*100:.0f}% gain trigger → trails {TRAIL_PCT*100:.0f}% below running high",
     f"  Breakeven Stop: move stop to entry at +{BREAKEVEN_TRIGGER*100:.0f}% gain" if BREAKEVEN_TRIGGER > 0 else "  Breakeven Stop: disabled",
@@ -855,6 +972,10 @@ lines += [
     DIV, "",
 ]
 
+avg_hold_all   = sum(t["hold_days"] for t in all_trades) / total if total else 0
+avg_hold_wins  = sum(t["hold_days"] for t in wins)   / len(wins)   if wins   else 0
+avg_hold_losses= sum(t["hold_days"] for t in losses) / len(losses) if losses else 0
+
 lines += [
     "OVERALL PERFORMANCE",
     DIV2,
@@ -866,12 +987,38 @@ lines += [
     f"  Avg Loss        : ${avg_loss:+,.2f}",
     f"  Profit Factor   : {pf:.2f}",
     f"  Total P&L       : ${total_pnl:+,.2f}",
+    f"  Avg Hold (all)  : {avg_hold_all:.1f} trading days",
+    f"  Avg Hold (wins) : {avg_hold_wins:.1f} trading days",
+    f"  Avg Hold (losses): {avg_hold_losses:.1f} trading days",
+    "",
+]
+
+lines += [
+    "RISK & PERFORMANCE METRICS",
+    DIV2,
+    f"  CAGR                  : {cagr:+.2f}%  (${STARTING_BALANCE:,.0f} → ${compound_balance:,.0f} over {_years:.1f} yrs)",
+    f"  Best Year             : {_best_year[0]}  (${_best_year[1]['pnl']:+,.2f})",
+    f"  Worst Year            : {_worst_year[0]}  (${_worst_year[1]['pnl']:+,.2f})",
+    "",
+    f"  Max Drawdown          : -{_mdd_pct:.1f}%  (${_mdd_dollar:,.2f})  peak ${_mdd_peak_bal:,.2f} → trough ${_mdd_trough_bal:,.2f}",
+    f"  Recovery Time         : {'still in drawdown at end of period' if _in_recovery else (str(_recovery_trades) + ' trades' if _recovery_trades is not None else 'no drawdown')}",
+    "",
+    f"  Avg Win  (%)          : {avg_win_pct:+.2f}%  per trade",
+    f"  Avg Loss (%)          : {avg_loss_pct:+.2f}%  per trade",
+    f"  Reward:Risk Ratio     : {rr_ratio:.2f}:1  (avg win / avg loss)",
+    "",
+    f"  Max Consec. Losses    : {_max_streak}  ({_max_streak_start} → {_max_streak_end})" if _max_streak > 0 else "  Max Consec. Losses    : 0",
+    "",
+    f"  Sharpe Ratio          : {sharpe:.2f}  (annualized, RF=0%)",
+    f"  Sortino Ratio         : {'∞ (no negative years)' if sortino == float('inf') else f'{sortino:.2f}'}  (downside deviation, negative years only)",
+    f"  Annual Return  (mean) : {_mean_ret:+.1f}%",
+    f"  Annual Return  (std)  : ±{_std_ret:.1f}%",
     "",
 ]
 
 lines += ["ACCOUNT GROWTH SIMULATION", DIV2,
           f"  Starting Balance : ${STARTING_BALANCE:,.0f}",
-          f"  Trade Size       : ${TRADE_SIZE:,} in year 1, ×{1+TRADE_SIZE_GROWTH:.0%}/year thereafter (flat, no compounding)",
+          f"  Trade Size       : ${TRADE_SIZE:,} in year 1, +${TRADE_SIZE_INCREMENT:,}/year flat thereafter (no compounding)",
           f"  Method           : Flat P&L per trade using year-specific trade size",
           ""]
 lines.append(f"  {'Year':<6}  {'Size':>6}  {'Trades':>6}  {'Year P&L':>12}  {'End Balance':>14}  {'Yr Return':>10}")
@@ -886,8 +1033,9 @@ lines.append("")
 
 lines += ["EXIT REASON BREAKDOWN", DIV2]
 for reason, d in sorted(by_reason.items(), key=lambda x: -x[1]["count"]):
-    wr = d["wins"] / d["count"] * 100 if d["count"] else 0
-    lines.append(f"  {reason:<22}: {d['count']:>3} trades   Win%: {wr:>5.1f}%   P&L: ${d['pnl']:+,.2f}")
+    wr   = d["wins"] / d["count"] * 100 if d["count"] else 0
+    avgd = d["hold_days"] / d["count"] if d["count"] else 0
+    lines.append(f"  {reason:<22}: {d['count']:>3} trades   Win%: {wr:>5.1f}%   Avg Hold: {avgd:>4.1f}d")
 lines.append("")
 
 # ── Entry quality analysis ──────────────────────────────────────────────────
@@ -1018,7 +1166,7 @@ with open(CSV_FILE, "w", newline="") as f:
     # Account growth simulation
     writer.writerow(["ACCOUNT GROWTH SIMULATION"])
     writer.writerow(["Starting Balance", f"${STARTING_BALANCE:,.0f}"])
-    writer.writerow(["Trade Size", f"${TRADE_SIZE:,} year 1, x{1+TRADE_SIZE_GROWTH:.0%}/year (flat)"])
+    writer.writerow(["Trade Size", f"${TRADE_SIZE:,} year 1, +${TRADE_SIZE_INCREMENT:,}/year flat"])
     writer.writerow(["Year", "Trade Size", "Trades", "Year P&L", "End Balance", "Yr Return %"])
     for year in sorted(by_year_compound.keys()):
         d  = by_year_compound[year]
