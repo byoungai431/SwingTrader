@@ -19,7 +19,7 @@ Confidence tiers:
   <4           : dropped by run_daily.py — never saved or notified
 
 Engine 2: Index Fade
-  BUY  : Base RSI > 80 (or 85 for 5★) and inverse ETF mapped.
+  BUY  : Base RSI ≥ 80 AND price ≥ BB Upper (both required). RSI ≥ 85 → 5★.
 
 Engine 3: Leveraged Shock-Bounce
   BUY  : Base RSI < 25 (5★) or RSI < 30 + Relative Vol ≥ 1.5x (4★). Inverse/Leveraged mapped.
@@ -237,12 +237,10 @@ def get_index_fade_signal(base_ticker: str, indicators: dict) -> dict:
     if not inverse_ticker:
         return _NO_TRADE  # Only process known indexed pairs
 
-    if rsi > 80:
+    # Mirrors backtest: requires BOTH RSI >= 80 AND price >= BB Upper (tight filter)
+    if rsi >= 80 and bb_upper is not None and close >= bb_upper:
         stars = 5 if rsi >= 85 else 4
-        strategies = [f"Overbought Fade (RSI {rsi:.1f} > 80)"]
-        if bb_upper is not None and close >= bb_upper:
-            strategies.append("BB Upper Band Rejection")
-            if stars == 5: stars = 6  # 5★ MAX
+        strategies = [f"Overbought Fade (RSI {rsi:.1f} ≥ 80)", "BB Upper Band Breach"]
 
         tp_pct = 0.10 if stars >= 5 else 0.05
         stop_pct = 0.05

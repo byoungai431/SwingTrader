@@ -427,22 +427,25 @@ def run():
                     signal = "NO TRADE"
                     sig["signal"] = "NO TRADE"
 
-                # IBS entry filter (Core only)
-                if signal == "BUY" and IBS_ENTRY_FILTER and is_core_long:
+                # IBS entry filter — mirrors backtest: use YESTERDAY's IBS on base ticker
+                # Applies to Engine 1 (core swing) and Engine 3 (leveraged), not Engine 2 (inverse ETF fade)
+                is_leveraged = target_ticker in ["UPRO", "TQQQ", "TSLL", "NVDL"]
+                apply_ibs = is_core_long or is_leveraged
+                if signal == "BUY" and IBS_ENTRY_FILTER and apply_ibs:
                     try:
-                        h = float(df["High"].iloc[-1])
-                        l = float(df["Low"].iloc[-1])
-                        c = float(df["Close"].iloc[-1])
+                        h = float(df["High"].iloc[-2])
+                        l = float(df["Low"].iloc[-2])
+                        c = float(df["Close"].iloc[-2])
                         rng = h - l
                         if rng > 0:
-                            today_ibs = (c - l) / rng
+                            prev_ibs = (c - l) / rng
                             threshold = IBS_MAX_ENTRY_5STAR if conf >= 5 else IBS_MAX_ENTRY_4STAR
-                            if today_ibs >= threshold:
-                                print(f"         🚫 IBS filter: IBS {today_ibs:.2f} ≥ {threshold} — skipping {target_ticker}")
+                            if prev_ibs >= threshold:
+                                print(f"         🚫 IBS filter: prev IBS {prev_ibs:.2f} ≥ {threshold} — skipping {target_ticker}")
                                 signal = "NO TRADE"
                                 sig["signal"] = "NO TRADE"
                     except Exception:
-                        pass 
+                        pass
 
                 # SELL signals only apply to open BUY positions
                 if signal == "SELL":
