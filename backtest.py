@@ -25,11 +25,11 @@ WL_FILE     = os.path.join(BASE_DIR, "watchlist.json")
 OUT_DIR     = os.path.join(BASE_DIR, "backtest results")
 os.makedirs(OUT_DIR, exist_ok=True)
 
-START_DATE  = "2015-01-01"
-END_DATE    = "2026-01-01"
-TRADE_SIZE           = 700  # $ per signal in the first year of the backtest
-TRADE_SIZE_INCREMENT = 500  # flat $ increase per subsequent year
-STARTING_BALANCE = 4_000   # $ starting account balance
+START_DATE  = "1994-01-01"
+END_DATE    = "2004-01-01"
+TRADE_SIZE           = 2_000  # $ per signal in the first year of the backtest
+TRADE_SIZE_INCREMENT = 300    # flat $ increase per subsequent year
+STARTING_BALANCE = 10_000    # $ starting account balance
 POSITION_PCT     = 0.20    # fraction of account per trade (used only if compound mode re-enabled)
 COMMISSION    = 0.001      # 0.1% per side
 ATR_MULT      = 2.0        # stop = entry ± ATR_MULT × ATR14

@@ -59,6 +59,8 @@ _CSS = """
   .hold     { background: rgba(160,144,255,0.15); color: #a090ff;
               border: 1px solid rgba(160,144,255,0.4); }
   .stars    { color: #ffd700; font-size: 14px; }
+  .stars-max{ color: #4dd0e1; font-size: 14px; }
+  .stars-4  { color: #b0bec5; font-size: 14px; }
   .meta     { font-size: 12px; color: #9090bb; line-height: 1.9; }
   .meta b   { color: #c8c8ff; font-weight: 600; }
   .rationale{ font-size: 12px; color: #8880aa; margin-top: 8px;
@@ -72,9 +74,27 @@ _CSS = """
 """
 
 
+def _stars_html(conf: int) -> str:
+    """Return a styled HTML star span. Tiers: 6=5★MAX (blue diamond), 5=5★ (gold), 4=4★ (silver)."""
+    if conf >= 6:
+        return '<span class="stars-max">💎💎💎💎💎</span>'
+    if conf >= 5:
+        return '<span class="stars">★★★★★</span>'
+    return '<span class="stars-4">★★★★☆</span>'
+
+
+def _stars_text(conf: int) -> str:
+    """Return an emoji/text star string for Telegram and push notifications."""
+    if conf >= 6:
+        return "💎💎💎💎💎"
+    if conf >= 5:
+        return "⭐⭐⭐⭐⭐"
+    return "🔘🔘🔘🔘☆"
+
+
 def _signal_card_html(s: dict) -> str:
     conf   = s.get("confidence", 0) or 0
-    stars  = "★" * conf + "☆" * (5 - conf)
+    stars  = _stars_html(conf)
     sig    = s.get("signal", "")
     cls    = "buy" if sig == "BUY" else "sell"
     price  = f"${s['price']:.2f}" if s.get("price") else "—"
@@ -88,7 +108,7 @@ def _signal_card_html(s: dict) -> str:
   <div class="card-top">
     <span class="ticker">{s['ticker']}</span>
     <span class="badge {cls}">{sig}</span>
-    <span class="stars">{stars}</span>
+    {stars}
   </div>
   <div class="meta">
     <b>Entry:</b> {price} &nbsp;|&nbsp; <b>Stop:</b> {html.escape(str(stop))} &nbsp;|&nbsp; <b>Target:</b> {html.escape(str(target))}
@@ -100,7 +120,7 @@ def _signal_card_html(s: dict) -> str:
 def _open_position_card_html(r: dict) -> str:
     """Card for an open BUY position with live P&L."""
     conf    = r.get("confidence", 0) or 0
-    stars   = "★" * conf + "☆" * (5 - conf)
+    stars   = _stars_html(conf)
     entry   = r.get("price", 0) or 0
     stop    = r.get("stop_loss", "—") or "—"
     target  = r.get("target", "—") or "—"
@@ -122,7 +142,7 @@ def _open_position_card_html(r: dict) -> str:
   <div class="card-top">
     <span class="ticker">{r['ticker']}</span>
     <span class="badge hold">OPEN</span>
-    <span class="stars">{stars}</span>
+    {stars}
     &nbsp; {pnl_block}
   </div>
   <div class="meta">
@@ -258,7 +278,7 @@ def send_daily_summary(signals: list[dict], results: dict, source: str,
     if signals:
         for s in signals:
             conf  = s.get("confidence", 0) or 0
-            stars = "★" * conf + "☆" * (5 - conf)
+            stars = _stars_text(conf)
             txt_lines.append(f"{s['signal']:4}  {s['ticker']:<6}  {stars}  ${s.get('price', 0):.2f}")
             if s.get("rationale"):
                 txt_lines.append(f"      {s['rationale'][:120]}")
@@ -301,11 +321,11 @@ def send_push(signals: list[dict]) -> bool:
     lines = []
     for s in buys:
         conf  = s.get("confidence", 0) or 0
-        stars = "★" * conf + "☆" * (5 - conf)
+        stars = _stars_text(conf)
         lines.append(f"🚀 {s['ticker']}  {stars}  ${s.get('price', 0):.2f}")
     for s in sells:
         conf  = s.get("confidence", 0) or 0
-        stars = "★" * conf + "☆" * (5 - conf)
+        stars = _stars_text(conf)
         lines.append(f"🔻 {s['ticker']}  {stars}  ${s.get('price', 0):.2f}")
 
     body = "\n".join(lines)
@@ -351,7 +371,7 @@ def _build_telegram_message(signals: list[dict]) -> str:
         lines.append(f"🚀 <b>BUY Signals ({len(buys)})</b>")
         for s in buys:
             conf  = s.get("confidence", 0) or 0
-            stars = "★" * conf + "☆" * (5 - conf)
+            stars = _stars_text(conf)
             price = f"${s.get('price', 0):.2f}"
             lines.append(f"  <b>{_esc(s['ticker'])}</b>  {stars}  {price}")
             lines.append(f"  Entry: {price}  |  Stop: {_esc(s.get('stop_loss', '—'))}  |  Target: {_esc(s.get('target', '—'))}")
@@ -363,7 +383,7 @@ def _build_telegram_message(signals: list[dict]) -> str:
         lines.append(f"🔻 <b>SELL Signals ({len(sells)})</b>")
         for s in sells:
             conf  = s.get("confidence", 0) or 0
-            stars = "★" * conf + "☆" * (5 - conf)
+            stars = _stars_text(conf)
             price = f"${s.get('price', 0):.2f}"
             lines.append(f"  <b>{_esc(s['ticker'])}</b>  {stars}  {price}")
             if s.get("rationale"):
@@ -435,7 +455,7 @@ def send_daily_telegram(signals: list[dict]) -> bool:
             lines.append(f"🚀 <b>BUY ({len(buys)})</b>")
             for s in buys:
                 conf  = s.get("confidence", 0) or 0
-                stars = "★" * conf + "☆" * (5 - conf)
+                stars = _stars_text(conf)
                 price = f"${s.get('price', 0):.2f}"
                 lines.append(f"  <b>{_esc(s['ticker'])}</b>  {stars}  {price}")
                 lines.append(f"  Stop: {_esc(s.get('stop_loss', '—'))}  |  Target: {_esc(s.get('target', '—'))}")
@@ -447,7 +467,7 @@ def send_daily_telegram(signals: list[dict]) -> bool:
             lines.append(f"🔻 <b>SELL ({len(sells)})</b>")
             for s in sells:
                 conf  = s.get("confidence", 0) or 0
-                stars = "★" * conf + "☆" * (5 - conf)
+                stars = _stars_text(conf)
                 price = f"${s.get('price', 0):.2f}"
                 lines.append(f"  <b>{_esc(s['ticker'])}</b>  {stars}  {price}")
                 if s.get("rationale"):

@@ -68,9 +68,11 @@ def compute_indicators(df: pd.DataFrame, ticker: str | None = None) -> dict:
     week52_high_date = lookback["High"].idxmax().strftime("%b %d, %Y")
     week52_low_date = lookback["Low"].idxmin().strftime("%b %d, %Y")
 
-    # 50-day and 200-day moving averages
+    # Moving averages
+    ma20 = round(close.rolling(20).mean().iloc[-1], 2) if len(close) >= 20 else None
     ma50 = round(close.rolling(50).mean().iloc[-1], 2) if len(close) >= 50 else None
     ma200 = round(close.rolling(200).mean().iloc[-1], 2) if len(close) >= 200 else None
+    high20 = round(df["High"].rolling(20).max().iloc[-1], 2) if len(close) >= 20 else None
 
     golden_cross = (ma50 is not None and ma200 is not None and ma50 > ma200)
 
@@ -143,6 +145,8 @@ def compute_indicators(df: pd.DataFrame, ticker: str | None = None) -> dict:
         "macd_crossover": macd_crossover,
         "prev_macd_hist": prev_macd_hist,
         "latest_close": round(float(close.iloc[-1]), 2),
+        "latest_open": round(float(df["Open"].iloc[-1]), 2),
+        "latest_low": round(float(df["Low"].iloc[-1]), 2),
         "prev_close": prev_close,
         "prev2_close": prev2_close,
         "latest_date": df.index[-1].strftime("%Y-%m-%d"),
@@ -150,7 +154,9 @@ def compute_indicators(df: pd.DataFrame, ticker: str | None = None) -> dict:
         "week52_high_date": week52_high_date,
         "week52_low": week52_low,
         "week52_low_date": week52_low_date,
+        "ma20": ma20,
         "ma50": ma50,
+        "high20": high20,
         "prev_ma50": prev_ma50,
         "ma200": ma200,
         "golden_cross": golden_cross,

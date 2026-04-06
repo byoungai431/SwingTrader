@@ -20,7 +20,7 @@ import pandas as pd
 from config import WATCHLIST, HISTORY_DAYS, ANTHROPIC_API_KEY, VIX_MAX
 from indicators import compute_indicators
 from fundamentals import fetch_fundamentals
-from signal_engine import get_signal
+from signal_engine import get_signal, get_index_fade_signal, get_leveraged_signal
 from history import save_signal, get_performance_stats, get_conn
 from notify import send_telegram, send_daily_summary, send_daily_telegram, send_push, send_exit_alert
 
@@ -332,7 +332,14 @@ def run():
 
     today    = datetime.now().strftime("%Y-%m-%d")
     universe = _get_sp500_tickers() if USE_SP500 else list(WATCHLIST)
-    source   = f"S&P 500 ({len(universe)} stocks)" if USE_SP500 else f"Watchlist ({len(universe)} stocks)"
+    
+    # Inject base tickers for Engine 2 & 3
+    base_tickers = ["SPY", "QQQ", "TSLA", "NVDA", "RWM", "PSQ"]
+    for bt in base_tickers:
+        if bt not in universe:
+            universe.append(bt)
+
+    source   = f"S&P 500 + Indices ({len(universe)} items)" if USE_SP500 else f"Watchlist ({len(universe)} stocks)"
 
     # ── Market regime check ────────────────────────────────────────────────────
     vix_level   = _get_vix()
@@ -380,77 +387,117 @@ def run():
                 continue
 
             fund = fetch_fundamentals(ticker)
-            sig  = get_signal(ticker, ind, fund)
+            
+            # Evaluate multiple engines
+            generated_signals = []
+            
+            # Engine 1: Core Long Swing (Skip ETFs/Indices for core swing)
+            if ticker not in ["SPY", "QQQ", "RWM", "PSQ", "SPXU", "SQQQ", "UPRO", "TQQQ", "TSLL", "NVDL", "IWM"]:
+                generated_signals.append(get_signal(ticker, ind, fund))
+                
+            # Engine 2: Index Fade
+            sig_fade = get_index_fade_signal(ticker, ind)
+            if sig_fade.get("signal") in ("BUY", "SELL"):
+                generated_signals.append(sig_fade)
+                
+            # Engine 3: Leveraged Shock-Bounce
+            sig_lev = get_leveraged_signal(ticker, ind)
+            if sig_lev.get("signal") in ("BUY", "SELL"):
+                generated_signals.append(sig_lev)
 
-            signal = sig.get("signal", "ERROR")
-            conf   = sig.get("confidence_stars", 0)
-            price  = float(ind["latest_close"])
+            if not generated_signals:
+                generated_signals.append({"ticker": ticker, "signal": "NO TRADE", "confidence_stars": 0, "rationale": "No conditions met."})
 
-            # Suppress BUY signals when VIX is elevated
-            if signal == "BUY" and buy_blocked:
-                signal = "NO TRADE"
-                sig["signal"] = "NO TRADE"
+            base_price = float(ind["latest_close"])
 
-            # Suppress 5★ BUY signals during consecutive-loss cooldown
-            if signal == "BUY" and conf >= 5 and _in_5star_cooldown(today):
-                print(f"         ⏸  5★ cooldown active — skipping {ticker}")
-                signal = "NO TRADE"
-                sig["signal"] = "NO TRADE"
+            for sig in generated_signals:
+                signal = sig.get("signal", "ERROR")
+                conf   = sig.get("confidence_stars", 0)
+                target_ticker = sig.get("ticker", ticker)
 
-            # IBS entry filter: today's bar must close near its low (deep oversold confirmation)
-            if signal == "BUY" and IBS_ENTRY_FILTER:
-                try:
-                    h = float(df["High"].iloc[-1])
-                    l = float(df["Low"].iloc[-1])
-                    c = float(df["Close"].iloc[-1])
-                    rng = h - l
-                    if rng > 0:
-                        today_ibs = (c - l) / rng
-                        threshold = IBS_MAX_ENTRY_5STAR if conf >= 5 else IBS_MAX_ENTRY_4STAR
-                        if today_ibs >= threshold:
-                            print(f"         🚫 IBS filter: IBS {today_ibs:.2f} ≥ {threshold} — skipping")
-                            signal = "NO TRADE"
-                            sig["signal"] = "NO TRADE"
-                except Exception:
-                    pass  # if IBS can't be computed, don't block the signal
-
-            # SELL signals only apply to open BUY positions — skip if none exists
-            if signal == "SELL":
-                try:
-                    conn = get_conn()
-                    with conn.cursor() as _c:
-                        _c.execute(
-                            "SELECT id FROM signals WHERE ticker=%s AND signal='BUY' AND exit_price IS NULL LIMIT 1",
-                            (ticker,)
-                        )
-                        has_open_buy = _c.fetchone() is not None
-                    conn.close()
-                except Exception:
-                    has_open_buy = False
-                if not has_open_buy:
+                # Suppress BUY signals when VIX is elevated (Only applies to Core Swing; Hedges ignore VIX)
+                is_core_long = (target_ticker not in ["SPXU", "SQQQ", "IWM", "QQQ", "UPRO", "TQQQ", "TSLL", "NVDL"] and target_ticker == ticker)
+                if signal == "BUY" and buy_blocked and is_core_long:
                     signal = "NO TRADE"
                     sig["signal"] = "NO TRADE"
 
-            if signal in ("BUY", "SELL"):
-                save_signal(ticker, sig, price)
-                signal_dict = {
-                    "ticker":     ticker,
-                    "signal":     signal,
-                    "confidence": conf,
-                    "price":      price,
-                    "entry_zone": sig.get("entry_zone"),
-                    "stop_loss":  sig.get("stop_loss"),
-                    "target":     sig.get("target"),
-                    "rationale":  sig.get("rationale"),
-                }
-                notify_signals.append(signal_dict)
+                # Suppress 5★ BUY signals during consecutive-loss cooldown (Core only)
+                if signal == "BUY" and conf >= 5 and _in_5star_cooldown(today) and is_core_long:
+                    print(f"         ⏸  5★ cooldown active — skipping {target_ticker}")
+                    signal = "NO TRADE"
+                    sig["signal"] = "NO TRADE"
 
-            results[signal if signal in results else "ERROR"].append(ticker)
+                # IBS entry filter (Core only)
+                if signal == "BUY" and IBS_ENTRY_FILTER and is_core_long:
+                    try:
+                        h = float(df["High"].iloc[-1])
+                        l = float(df["Low"].iloc[-1])
+                        c = float(df["Close"].iloc[-1])
+                        rng = h - l
+                        if rng > 0:
+                            today_ibs = (c - l) / rng
+                            threshold = IBS_MAX_ENTRY_5STAR if conf >= 5 else IBS_MAX_ENTRY_4STAR
+                            if today_ibs >= threshold:
+                                print(f"         🚫 IBS filter: IBS {today_ibs:.2f} ≥ {threshold} — skipping {target_ticker}")
+                                signal = "NO TRADE"
+                                sig["signal"] = "NO TRADE"
+                    except Exception:
+                        pass 
 
-            stars = "★" * conf + "☆" * (5 - conf)
-            print(f"  {ticker:<6}  {signal:<8}  {stars}  ${price:.2f}")
-            if sig.get("rationale"):
-                print(f"         {sig['rationale'][:90]}")
+                # SELL signals only apply to open BUY positions
+                if signal == "SELL":
+                    try:
+                        conn = get_conn()
+                        with conn.cursor() as _c:
+                            _c.execute(
+                                "SELECT id FROM signals WHERE ticker=%s AND signal='BUY' AND exit_price IS NULL LIMIT 1",
+                                (target_ticker,)
+                            )
+                            has_open_buy = _c.fetchone() is not None
+                        conn.close()
+                    except Exception:
+                        has_open_buy = False
+                    if not has_open_buy:
+                        signal = "NO TRADE"
+                        sig["signal"] = "NO TRADE"
+
+                # Drop sub-4★ signals
+                if signal in ("BUY", "SELL") and conf < 4:
+                    print(f"         ✂️  Conf {conf}★ < 4★ minimum — skipping {target_ticker}")
+                    signal = "NO TRADE"
+                    sig["signal"] = "NO TRADE"
+
+                if signal in ("BUY", "SELL"):
+                    # If target ticker is mapped dynamically (e.g. SPY -> UPRO), we must fetch UPRO's price globally
+                    if target_ticker != ticker:
+                        try:
+                            t_df = fetch_price_data(target_ticker)
+                            sig_price = float(t_df["Close"].dropna().iloc[-1].item())
+                        except Exception:
+                            sig_price = base_price 
+                    else:
+                        sig_price = base_price
+                        
+                    save_signal(target_ticker, sig, sig_price)
+                    signal_dict = {
+                        "ticker":     target_ticker,
+                        "signal":     signal,
+                        "confidence": conf,
+                        "price":      sig_price,
+                        "entry_zone": sig.get("entry_zone"),
+                        "stop_loss":  sig.get("stop_loss"),
+                        "target":     sig.get("target"),
+                        "rationale":  sig.get("rationale"),
+                    }
+                    notify_signals.append(signal_dict)
+
+                results[signal if signal in results else "ERROR"].append(target_ticker)
+
+                stars = "★" * conf + "☆" * (5 - conf)
+                if signal != "NO TRADE" or target_ticker == ticker:
+                    print(f"  {target_ticker:<6}  {signal:<8}  {stars}  (Base: ${base_price:.2f})")
+                if sig.get("rationale") and signal != "NO TRADE":
+                    print(f"         {sig['rationale'][:120]}")
 
             # Brief pause to stay within API rate limits
             time.sleep(0.5)

@@ -29,13 +29,17 @@ _SIZING_START_YEAR  = 1994   # year 1 of the model
 _SIZING_BASE        = 2_000  # $ per trade in year 1
 _SIZING_INCREMENT   = 300    # flat $ increase per subsequent year
 
-def get_trade_size(date_str) -> int:
-    """Return the model trade size for a given date, matching the backtest formula."""
+def get_trade_size(date_str, confidence=None) -> int:
+    """Return the model trade size for a given date, matching the backtest formula.
+    5★ and 6★ (5★ MAX DIAMOND) trades are sized 30% larger, matching FIVE_STAR_SIZE_MULT=1.30."""
     try:
         year = int(str(date_str)[:4])
     except Exception:
         year = _SIZING_START_YEAR
-    return _SIZING_BASE + _SIZING_INCREMENT * max(0, year - _SIZING_START_YEAR)
+    base = _SIZING_BASE + _SIZING_INCREMENT * max(0, year - _SIZING_START_YEAR)
+    if confidence is not None and int(confidence) >= 5:
+        base = round(base * 1.30)
+    return base
 
 # Auto-refresh every 2 minutes so new scan results appear without manual reload
 st_autorefresh(interval=2 * 60 * 1000, key="autorefresh")
@@ -1213,7 +1217,7 @@ def show_recommended_view(user_id=""):
                 if r["price"] and r["exit_price"]:
                     pnl = (r["exit_price"] - r["price"]) / r["price"] * 100 if r["signal"] == "BUY" \
                           else (r["price"] - r["exit_price"]) / r["price"] * 100
-                    ts  = get_trade_size(r.get("date", ""))
+                    ts  = get_trade_size(r.get("date", ""), r.get("confidence"))
                     dollar_pnl = ts * pnl / 100
                     total_pnl += pnl
                     total_dollar_pnl += dollar_pnl
@@ -1324,7 +1328,7 @@ def show_recommended_view(user_id=""):
                 if entry and exit_price:
                     pnl_pct   = (exit_price - entry) / entry * 100 if r["signal"] == "BUY" \
                                 else (entry - exit_price) / entry * 100
-                    ts        = get_trade_size(r.get("date", ""))
+                    ts        = get_trade_size(r.get("date", ""), r.get("confidence"))
                     dollar_pnl = ts * pnl_pct / 100
                     pnl_color = "#39d98a" if pnl_pct >= 0 else "#ff6b6b"
                     result_icon = "✅" if pnl_pct >= 0 else "❌"
@@ -1408,7 +1412,7 @@ def show_positions_view(user_id=""):
         unsafe_allow_html=True
     )
 
-    tab_open, tab_hist = st.tabs(["📂  OPEN POSITIONS", "🏆  CLOSED TRADES"])
+    tab_open, tab_hist, tab_settings = st.tabs(["📂  OPEN POSITIONS", "🏆  CLOSED TRADES", "⚙️  SETTINGS"])
 
     # ── Tab 1: Open positions ─────────────────────────────────────────────────
     with tab_open:
@@ -1544,7 +1548,7 @@ def show_positions_view(user_id=""):
                 if t["exit_price"]:
                     _p = (t["exit_price"] - t["entry_price"]) / t["entry_price"] * 100
                     total_pnl += _p
-                    _amt = t.get("position_amount") or get_trade_size(t.get("entry_date", ""))
+                    _amt = t.get("position_amount") or get_trade_size(t.get("entry_date", ""), t.get("confidence"))
                     if t.get("position_amount"):
                         has_custom_amounts = True
                     total_dollar_pnl += _amt * _p / 100
@@ -1584,7 +1588,7 @@ def show_positions_view(user_id=""):
                 entry = t["entry_price"]
                 ep    = t["exit_price"]
                 pnl   = (ep - entry) / entry * 100 if ep else 0
-                ts    = t.get("position_amount") or get_trade_size(t.get("entry_date", ""))
+                ts    = t.get("position_amount") or get_trade_size(t.get("entry_date", ""), t.get("confidence"))
                 dollar_pnl = ts * pnl / 100 if ep else None
                 pnl_color = "#39d98a" if pnl >= 0 else "#ff6b6b"
                 conf  = int(t.get("confidence") or 0)
@@ -1623,6 +1627,28 @@ def show_positions_view(user_id=""):
                     unsafe_allow_html=True
                 )
                 st.markdown('<div style="margin-bottom:8px;"></div>', unsafe_allow_html=True)
+
+    # ── Tab 3: Settings ───────────────────────────────────────────────────────
+    with tab_settings:
+        st.markdown(
+            '<div style="font-size:11px;color:#a090ff;letter-spacing:0.18em;text-transform:uppercase;'
+            'font-weight:700;margin:16px 0 16px 2px;padding:4px 10px;background:rgba(160,144,255,0.08);'
+            'border-left:3px solid #a090ff;border-radius:0 4px 4px 0;">💰 Account Settings</div>',
+            unsafe_allow_html=True
+        )
+        _s = get_user_settings(user_id)
+        _bal = st.number_input(
+            "Starting balance ($)",
+            min_value=100.0, max_value=10_000_000.0,
+            value=float(_s.get("starting_balance") or 10_000),
+            step=500.0,
+            help="Used to suggest default trade sizes when entering positions",
+            key="main_starting_balance",
+        )
+        st.caption("This is used to pre-fill the suggested trade size when you enter a position (defaults to 20% of your balance).")
+        if st.button("💾  Save Settings", type="primary"):
+            save_user_settings(user_id, _bal)
+            st.toast("✅ Settings saved")
 
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
@@ -1795,20 +1821,6 @@ with st.sidebar.expander("⚙️  Manage Watchlist", expanded=False):
     )
 
 st.sidebar.divider()
-
-with st.sidebar.expander("💰  Account Settings", expanded=False):
-    _s = get_user_settings(user_id)
-    _bal = st.number_input(
-        "Starting balance ($)",
-        min_value=100.0, max_value=10_000_000.0,
-        value=float(_s.get("starting_balance") or 10_000),
-        step=500.0,
-        help="Used to suggest default trade sizes when entering positions",
-        key="sidebar_starting_balance",
-    )
-    if st.button("Save", key="save_account_settings", use_container_width=True):
-        save_user_settings(user_id, _bal)
-        st.toast("✅ Settings saved")
 
 st.sidebar.divider()
 
