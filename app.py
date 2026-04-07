@@ -21,8 +21,9 @@ from history import (save_signal, get_history, dismiss_signal,
                       get_user_settings, save_user_settings)
 from config import WATCHLIST, ANTHROPIC_API_KEY
 from notify import send_exit_alert
+from signal_engine import compute_hot_sectors, get_sector_hunter_signal
 
-st.set_page_config(page_title="To The Moon", layout="wide", page_icon="🚀")
+st.set_page_config(page_title="Nexus Edge", layout="wide", page_icon="📊")
 
 # ── Position sizing (mirrors backtest config) ────────────────────────────────
 _SIZING_START_YEAR  = 1994   # year 1 of the model
@@ -41,6 +42,32 @@ def get_trade_size(date_str, confidence=None) -> int:
         base = round(base * 1.30)
     return base
 
+@st.cache_data(ttl=3600)
+def _get_sp500_sector_map_cached() -> dict:
+    """Fetch S&P 500 GICS sector map from Wikipedia (cached 1 hour). Returns {ticker: sector}."""
+    import urllib.request
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    })
+    try:
+        with urllib.request.urlopen(req) as resp:
+            html = resp.read().decode("utf-8")
+        import pandas as pd
+        table = pd.read_html(html)[0]
+        table["Symbol"] = table["Symbol"].str.replace(".", "-", regex=False)
+        return dict(zip(table["Symbol"], table["GICS Sector"]))
+    except Exception:
+        return {}
+
+
+@st.cache_data(ttl=3600)
+def _get_hot_sectors_cached() -> set:
+    """Compute today's hot sectors (cached 1 hour)."""
+    return compute_hot_sectors()
+
+
 # Auto-refresh every 2 minutes so new scan results appear without manual reload
 st_autorefresh(interval=2 * 60 * 1000, key="autorefresh")
 
@@ -56,9 +83,9 @@ if _auth_enabled and not _st_user.is_logged_in:
     st.markdown(
         '<div style="display:flex;flex-direction:column;align-items:center;'
         'justify-content:center;height:80vh;gap:24px;">'
-        '<div style="font-size:56px;">🚀</div>'
-        '<div style="font-size:32px;font-weight:900;letter-spacing:0.06em;color:#c0c0ff;">To The Moon</div>'
-        '<div style="font-size:14px;color:#8888bb;">Sign in to access your signals and positions.</div>'
+        '<div style="font-size:40px;letter-spacing:0.08em;font-weight:900;color:#c8d8f8;">NEXUS EDGE</div>'
+        '<div style="font-size:13px;color:#4a5a7a;letter-spacing:0.22em;text-transform:uppercase;margin-top:6px;">Systematic Swing Signals</div>'
+        '<div style="font-size:14px;color:#8888bb;margin-top:12px;">Sign in to access your signals and positions.</div>'
         '</div>',
         unsafe_allow_html=True,
     )
@@ -93,29 +120,31 @@ def badge(label, color): return f'<span class="badge badge-{color}">{label}</spa
 def stars(n):
     n = int(n)
     if n >= 6:
-        return "★★★★★ MAX"
-    return "★" * n + "☆" * (5 - n)
+        return "Tier 1 · High Conviction"
+    elif n >= 5:
+        return "Tier 2 · Confident"
+    elif n >= 4:
+        return "Tier 3"
+    return "—"
 def conf_stars_html(n):
-    """Return HTML star display; confidence=6 renders as shiny blue '5★ MAX'."""
+    """Return HTML tier badge; confidence=6 renders as Tier 1 High Conviction."""
     n = int(n)
     if n >= 6:
         return (
-            '<span style="color:#40E0FF;font-weight:800;letter-spacing:2px;'
-            'text-shadow:0 0 8px rgba(64,224,255,1.0),0 0 20px rgba(0,191,255,0.7);">★★★★★</span>'
-            '<span style="color:#40E0FF;font-size:0.70em;font-weight:900;'
-            'letter-spacing:0.12em;text-shadow:0 0 8px rgba(64,224,255,1.0),0 0 20px rgba(0,191,255,0.7);'
-            'margin-left:5px;">MAX</span>'
+            '<span style="color:#40E0FF;font-weight:900;letter-spacing:3px;font-size:1em;'
+            'text-shadow:0 0 8px rgba(64,224,255,1.0),0 0 20px rgba(0,191,255,0.7);">TIER 1</span>'
+            '<span style="color:#40E0FF;font-size:0.72em;font-weight:700;'
+            'letter-spacing:0.14em;text-shadow:0 0 8px rgba(64,224,255,0.8);'
+            'margin-left:8px;">HIGH CONVICTION</span>'
         )
-    filled = "★" * n + "☆" * (5 - n)
-    if n == 5:
-        color = "#f9c846"  # gold
-    elif n == 4:
-        color = "#a8a8c0"  # silver
-    elif n == 3:
-        color = "#cd7f32"  # bronze
-    else:
-        color = "#ffffff"
-    return f'<span style="color:{color};font-weight:700;">{filled}</span>'
+    if n >= 5:
+        return (
+            '<span style="color:#f9c846;font-weight:900;letter-spacing:3px;font-size:1em;">TIER 2</span>'
+            '<span style="color:#f9c846;font-size:0.72em;font-weight:700;letter-spacing:0.14em;margin-left:8px;">CONFIDENT</span>'
+        )
+    if n >= 4:
+        return '<span style="color:#a8a8c0;font-weight:700;letter-spacing:3px;font-size:1em;">TIER 3</span>'
+    return '<span style="color:#5a5a7a;font-weight:600;">—</span>'
 
 
 # ── Global CSS ─────────────────────────────────────────────────────────────────
@@ -169,12 +198,12 @@ a, li, td, th, caption, pre {
     50%       { opacity: 0.55; }
 }
 @-webkit-keyframes panel-glow {
-    0%, 100% { box-shadow: 0 0 18px rgba(80,60,220,0.12), inset 0 0 30px rgba(8,8,35,0.5); }
-    50%       { box-shadow: 0 0 30px rgba(80,60,220,0.22), inset 0 0 40px rgba(8,8,35,0.6); }
+    0%, 100% { box-shadow: 0 0 14px rgba(0,60,100,0.12), inset 0 0 30px rgba(5,10,20,0.5); }
+    50%       { box-shadow: 0 0 24px rgba(0,80,130,0.20), inset 0 0 40px rgba(5,10,20,0.6); }
 }
 @keyframes panel-glow {
-    0%, 100% { box-shadow: 0 0 18px rgba(80,60,220,0.12), inset 0 0 30px rgba(8,8,35,0.5); }
-    50%       { box-shadow: 0 0 30px rgba(80,60,220,0.22), inset 0 0 40px rgba(8,8,35,0.6); }
+    0%, 100% { box-shadow: 0 0 14px rgba(0,60,100,0.12), inset 0 0 30px rgba(5,10,20,0.5); }
+    50%       { box-shadow: 0 0 24px rgba(0,80,130,0.20), inset 0 0 40px rgba(5,10,20,0.6); }
 }
 @-webkit-keyframes title-shimmer {
     0%   { background-position: 0% 50%; }
@@ -191,105 +220,36 @@ a, li, td, th, caption, pre {
 .anim-float    { -webkit-animation: float-planet 7s ease-in-out infinite; animation: float-planet 7s ease-in-out infinite; display:inline-block; }
 .anim-float-r  { -webkit-animation: float-planet 9s ease-in-out infinite reverse; animation: float-planet 9s ease-in-out infinite reverse; display:inline-block; }
 .anim-shimmer  {
-    background: linear-gradient(90deg, #a78bfa, #60a5fa, #38bdf8, #a78bfa);
+    background: linear-gradient(90deg, #c8d8f8, #90b8e0, #00C9B1, #90b8e0, #c8d8f8);
     background-size: 300% 300%;
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
-    -webkit-animation: title-shimmer 5s ease infinite;
-    animation: title-shimmer 5s ease infinite;
+    -webkit-animation: title-shimmer 6s ease infinite;
+    animation: title-shimmer 6s ease infinite;
 }
 
-/* ── Deep space background ── */
+/* ── Dark institutional background ── */
 .stApp {
     background:
-        radial-gradient(ellipse at 15% 85%, rgba(80,20,160,0.18) 0%, transparent 45%),
-        radial-gradient(ellipse at 85% 15%, rgba(20,60,160,0.14) 0%, transparent 45%),
-        radial-gradient(ellipse at 50% 30%, rgba(40,10,100,0.20) 0%, transparent 55%),
-        radial-gradient(ellipse at top, #0d0d2b 0%, #05050f 60%, #000005 100%);
+        radial-gradient(ellipse at 15% 85%, rgba(0,40,80,0.12) 0%, transparent 45%),
+        radial-gradient(ellipse at 85% 15%, rgba(0,30,60,0.10) 0%, transparent 45%),
+        radial-gradient(ellipse at top, #080e1c 0%, #050a14 60%, #030810 100%);
     min-height: 100vh;
 }
 
-/* ── Star layer 1 — small dim stars, slow twinkle ── */
-.stApp::before {
-    content: "";
-    position: fixed;
-    top: 0; left: 0; right: 0; bottom: 0;
-    pointer-events: none;
-    z-index: 0;
-    -webkit-animation: twinkle-a 7s ease-in-out infinite;
-    animation: twinkle-a 7s ease-in-out infinite;
-    background-image:
-        radial-gradient(1px 1px at  2%  4%, rgba(255,255,255,0.75) 0%, transparent 100%),
-        radial-gradient(1px 1px at  6% 18%, rgba(255,255,255,0.55) 0%, transparent 100%),
-        radial-gradient(1px 1px at 11%  9%, rgba(255,255,255,0.65) 0%, transparent 100%),
-        radial-gradient(1px 1px at 16% 37%, rgba(255,255,255,0.45) 0%, transparent 100%),
-        radial-gradient(1px 1px at 21% 61%, rgba(255,255,255,0.55) 0%, transparent 100%),
-        radial-gradient(1px 1px at 27% 14%, rgba(255,255,255,0.65) 0%, transparent 100%),
-        radial-gradient(1px 1px at 32% 80%, rgba(255,255,255,0.40) 0%, transparent 100%),
-        radial-gradient(1px 1px at 38% 45%, rgba(255,255,255,0.55) 0%, transparent 100%),
-        radial-gradient(1px 1px at 43% 27%, rgba(255,255,255,0.70) 0%, transparent 100%),
-        radial-gradient(1px 1px at 49% 92%, rgba(255,255,255,0.45) 0%, transparent 100%),
-        radial-gradient(1px 1px at 54% 69%, rgba(255,255,255,0.60) 0%, transparent 100%),
-        radial-gradient(1px 1px at 59%  6%, rgba(255,255,255,0.50) 0%, transparent 100%),
-        radial-gradient(1px 1px at 64% 52%, rgba(255,255,255,0.45) 0%, transparent 100%),
-        radial-gradient(1px 1px at 70% 34%, rgba(255,255,255,0.70) 0%, transparent 100%),
-        radial-gradient(1px 1px at 75% 74%, rgba(255,255,255,0.50) 0%, transparent 100%),
-        radial-gradient(1px 1px at 80% 19%, rgba(255,255,255,0.65) 0%, transparent 100%),
-        radial-gradient(1px 1px at 85% 57%, rgba(255,255,255,0.45) 0%, transparent 100%),
-        radial-gradient(1px 1px at 89% 41%, rgba(255,255,255,0.55) 0%, transparent 100%),
-        radial-gradient(1px 1px at 93% 86%, rgba(255,255,255,0.35) 0%, transparent 100%),
-        radial-gradient(1px 1px at 96% 29%, rgba(255,255,255,0.65) 0%, transparent 100%),
-        radial-gradient(1px 1px at  4% 53%, rgba(200,200,255,0.55) 0%, transparent 100%),
-        radial-gradient(1px 1px at 18% 76%, rgba(200,200,255,0.45) 0%, transparent 100%),
-        radial-gradient(1px 1px at 34% 12%, rgba(200,200,255,0.60) 0%, transparent 100%),
-        radial-gradient(1px 1px at 47% 39%, rgba(200,200,255,0.40) 0%, transparent 100%),
-        radial-gradient(1px 1px at 61% 84%, rgba(200,200,255,0.50) 0%, transparent 100%),
-        radial-gradient(1px 1px at 77% 23%, rgba(200,200,255,0.55) 0%, transparent 100%),
-        radial-gradient(1px 1px at 92%  7%, rgba(200,200,255,0.45) 0%, transparent 100%),
-        radial-gradient(1px 1px at  9% 91%, rgba(220,220,255,0.35) 0%, transparent 100%),
-        radial-gradient(1px 1px at 52% 16%, rgba(220,220,255,0.50) 0%, transparent 100%),
-        radial-gradient(1px 1px at 88% 68%, rgba(220,220,255,0.40) 0%, transparent 100%);
-}
-
-/* ── Star layer 2 — larger bright stars, offset twinkle ── */
-.stApp::after {
-    content: "";
-    position: fixed;
-    top: 0; left: 0; right: 0; bottom: 0;
-    pointer-events: none;
-    z-index: 0;
-    -webkit-animation: twinkle-b 11s ease-in-out infinite;
-    animation: twinkle-b 11s ease-in-out infinite;
-    background-image:
-        radial-gradient(2px   2px   at  5% 22%, rgba(255,255,255,0.95) 0%, transparent 100%),
-        radial-gradient(1.5px 1.5px at 13% 67%, rgba(200,210,255,0.85) 0%, transparent 100%),
-        radial-gradient(2px   2px   at 24% 44%, rgba(255,255,255,0.90) 0%, transparent 100%),
-        radial-gradient(2.5px 2.5px at 37%  8%, rgba(255,240,200,1.00) 0%, transparent 100%),
-        radial-gradient(1.5px 1.5px at 45% 88%, rgba(255,255,255,0.80) 0%, transparent 100%),
-        radial-gradient(2px   2px   at 56% 33%, rgba(180,220,255,0.95) 0%, transparent 100%),
-        radial-gradient(2px   2px   at 67% 58%, rgba(255,255,255,0.85) 0%, transparent 100%),
-        radial-gradient(2.5px 2.5px at 78% 11%, rgba(255,230,180,1.00) 0%, transparent 100%),
-        radial-gradient(1.5px 1.5px at 86% 77%, rgba(255,255,255,0.75) 0%, transparent 100%),
-        radial-gradient(2px   2px   at 94% 42%, rgba(200,200,255,0.90) 0%, transparent 100%),
-        radial-gradient(3px   3px   at 50% 50%, rgba(255,255,220,1.00) 0%, transparent 100%),
-        radial-gradient(1.5px 1.5px at 30% 95%, rgba(255,255,255,0.80) 0%, transparent 100%),
-        radial-gradient(2px   2px   at 72%  3%, rgba(220,200,255,0.90) 0%, transparent 100%),
-        radial-gradient(1.5px 1.5px at 15% 55%, rgba(255,255,255,0.75) 0%, transparent 100%),
-        radial-gradient(2px   2px   at 60% 20%, rgba(255,250,210,0.95) 0%, transparent 100%),
-        radial-gradient(2.5px 2.5px at  8% 38%, rgba(200,230,255,0.90) 0%, transparent 100%),
-        radial-gradient(1.5px 1.5px at 42% 72%, rgba(255,255,255,0.85) 0%, transparent 100%),
-        radial-gradient(2px   2px   at 83% 48%, rgba(220,200,255,0.80) 0%, transparent 100%);
-}
+/* ── No decorative background layers ── */
+.stApp::before { content: none; }
+.stApp::after  { content: none; }
 
 /* ── Sidebar ── */
 section[data-testid="stSidebar"] {
     background: linear-gradient(180deg,
-        #010112 0%,
-        #030320 30%,
-        #050528 70%,
-        #020218 100%) !important;
-    border-right: 1px solid #15154a !important;
-    box-shadow: 3px 0 25px rgba(60,40,180,0.20) !important;
+        #060c18 0%,
+        #070d1c 30%,
+        #080e20 70%,
+        #060c18 100%) !important;
+    border-right: 1px solid #0d2035 !important;
+    box-shadow: 3px 0 25px rgba(0,40,80,0.18) !important;
 }
 section[data-testid="stSidebar"] > div {
     background: transparent !important;
@@ -297,23 +257,23 @@ section[data-testid="stSidebar"] > div {
 section[data-testid="stSidebar"] label,
 section[data-testid="stSidebar"] p,
 section[data-testid="stSidebar"] span {
-    color: #ccccee !important;
+    color: #c0d0e8 !important;
 }
 section[data-testid="stSidebar"] .stButton > button {
-    background: linear-gradient(135deg, #3300aa 0%, #1a0077 100%) !important;
-    color: #e0d0ff !important;
-    border: 1px solid #5533cc !important;
+    background: linear-gradient(135deg, #003a5a 0%, #002240 100%) !important;
+    color: #c8e0f0 !important;
+    border: 1px solid #005580 !important;
     font-weight: 800 !important;
     letter-spacing: 0.12em !important;
     text-transform: uppercase !important;
     font-size: 13px !important;
-    box-shadow: 0 0 18px rgba(85,51,204,0.35), 0 0 35px rgba(85,51,204,0.15) !important;
+    box-shadow: 0 0 14px rgba(0,80,120,0.30), 0 0 28px rgba(0,80,120,0.12) !important;
     -webkit-transition: all 0.3s ease !important;
     transition: all 0.3s ease !important;
     border-radius: 8px !important;
 }
 section[data-testid="stSidebar"] .stButton > button:hover {
-    box-shadow: 0 0 28px rgba(85,51,204,0.60), 0 0 55px rgba(85,51,204,0.25) !important;
+    box-shadow: 0 0 22px rgba(0,100,150,0.55), 0 0 44px rgba(0,100,150,0.22) !important;
     -webkit-transform: translateY(-2px) !important;
     transform: translateY(-2px) !important;
 }
@@ -353,14 +313,14 @@ button.wl-ticker-active {
 /* ── Return to Base button ── */
 section[data-testid="stSidebar"] .stButton.home-btn > button {
     background: transparent !important;
-    color: #00ddcc !important;
-    border: 1px solid #00ddcc !important;
-    box-shadow: 0 0 12px rgba(0,220,200,0.20), 0 0 25px rgba(0,220,200,0.08) !important;
+    color: #00C9B1 !important;
+    border: 1px solid #00C9B1 !important;
+    box-shadow: 0 0 10px rgba(0,201,177,0.18), 0 0 20px rgba(0,201,177,0.07) !important;
     font-size: 12px !important;
 }
 section[data-testid="stSidebar"] .stButton.home-btn > button:hover {
-    background: rgba(0,220,200,0.08) !important;
-    box-shadow: 0 0 22px rgba(0,220,200,0.45), 0 0 45px rgba(0,220,200,0.18) !important;
+    background: rgba(0,201,177,0.07) !important;
+    box-shadow: 0 0 20px rgba(0,201,177,0.40), 0 0 40px rgba(0,201,177,0.16) !important;
     -webkit-transform: translateY(-2px) !important;
     transform: translateY(-2px) !important;
 }
@@ -378,20 +338,20 @@ section[data-testid="stSidebar"] .stButton.home-btn > button:hover {
     align-items: center;
     gap: 6px;
     font-size: 11px;
-    color: #5555aa;
+    color: #3a5a6a;
     letter-spacing: 0.12em;
     text-transform: uppercase;
     font-weight: 600;
     margin-top: 14px;
     padding: 4px 10px;
-    border: 1px solid #1e1e50;
+    border: 1px solid #0e2a38;
     border-radius: 20px;
     -webkit-transition: color 0.2s, border-color 0.2s;
     transition: color 0.2s, border-color 0.2s;
 }
 .signal-details summary::-webkit-details-marker { display: none; }
-.signal-details summary:hover { color: #8888cc; border-color: #3a3a7a; }
-.signal-details[open] summary { color: #8888cc; border-color: #3a3a7a; }
+.signal-details summary:hover { color: #00C9B1; border-color: #00604a; }
+.signal-details[open] summary { color: #00C9B1; border-color: #00604a; }
 
 /* ── Badges ── */
 .badge {
@@ -410,9 +370,9 @@ section[data-testid="stSidebar"] .stButton.home-btn > button:hover {
 /* ── Panels ── */
 .panel {
     background: linear-gradient(135deg,
-        rgba(13,13,45,0.97) 0%,
-        rgba(7,7,28,0.99) 100%);
-    border: 1px solid #1c1c52;
+        rgba(8,14,30,0.97) 0%,
+        rgba(5,9,20,0.99) 100%);
+    border: 1px solid #0e2040;
     border-radius: 16px;
     padding: 20px 22px;
     height: 100%;
@@ -426,28 +386,28 @@ section[data-testid="stSidebar"] .stButton.home-btn > button:hover {
     position: absolute;
     top: -50%; left: -50%;
     width: 200%; height: 200%;
-    background: radial-gradient(ellipse at 30% 20%, rgba(80,60,200,0.04) 0%, transparent 60%);
+    background: radial-gradient(ellipse at 30% 20%, rgba(0,60,100,0.04) 0%, transparent 60%);
     pointer-events: none;
 }
 .panel-title {
     font-size: 13px;
-    color: #c8c8ff;
+    color: #c0d0e8;
     font-weight: 800;
     letter-spacing: 0.18em;
     text-transform: uppercase;
     margin-bottom: 16px;
     padding: 0 0 10px 14px;
-    border-bottom: 1px solid #2a2a6a;
-    border-left: 3px solid #5533cc;
-    text-shadow: 0 0 14px rgba(170,140,255,0.45);
+    border-bottom: 1px solid #0e2a40;
+    border-left: 3px solid #00C9B1;
+    text-shadow: 0 0 10px rgba(0,180,160,0.30);
 }
 
 /* ── Signal text ── */
 .signal-text-buy  { color:#39d98a; font-size:30px; font-weight:800; text-shadow:0 0 20px rgba(57,217,138,0.65); letter-spacing:0.06em; }
 .signal-text-sell { color:#ff6b6b; font-size:30px; font-weight:800; text-shadow:0 0 20px rgba(255,107,107,0.65); letter-spacing:0.06em; }
 .signal-text-none { color:#aaaacc; font-size:22px; font-weight:700; }
-.conf-stars       { font-size:22px; letter-spacing:4px; margin:8px 0; }
-.conf-stars-max   { font-size:22px; letter-spacing:2px; margin:8px 0; color:#40E0FF; font-weight:800; text-shadow:0 0 10px rgba(64,224,255,1.0), 0 0 28px rgba(0,191,255,0.8), 0 0 50px rgba(0,140,255,0.4); }
+.conf-stars       { font-size:18px; letter-spacing:3px; margin:8px 0; font-weight:700; }
+.conf-stars-max   { font-size:18px; letter-spacing:3px; margin:8px 0; color:#40E0FF; font-weight:900; text-shadow:0 0 10px rgba(64,224,255,0.9), 0 0 24px rgba(0,191,255,0.6), 0 0 40px rgba(0,140,255,0.3); }
 .rationale        { font-size:13px; color:#c8c8e8; line-height:1.80; margin-top:10px; }
 
 /* ── Range ── */
@@ -456,8 +416,8 @@ section[data-testid="stSidebar"] .stButton.home-btn > button:hover {
 
 /* ── Stock header ── */
 .stock-header {
-    background: linear-gradient(90deg, rgba(20,20,60,0.85), rgba(10,10,35,0.40));
-    border-left: 3px solid #4433bb;
+    background: linear-gradient(90deg, rgba(0,20,40,0.85), rgba(0,10,25,0.40));
+    border-left: 3px solid #00C9B1;
     padding: 12px 18px;
     margin-bottom: 18px;
     border-radius: 0 10px 10px 0;
@@ -485,8 +445,8 @@ section[data-testid="stSidebar"] .stButton.home-btn > button:hover {
 .fund-card {
     flex: 1;
     min-width: 90px;
-    background: rgba(10,10,35,0.80);
-    border: 1px solid #1c1c4a;
+    background: rgba(5,12,25,0.80);
+    border: 1px solid #0e2040;
     border-radius: 12px;
     padding: 12px 10px;
     text-align: center;
@@ -529,9 +489,9 @@ section[data-testid="stSidebar"] .stButton.home-btn > button:hover {
 /* ── Gauge panels — bordered containers ── */
 [data-testid="stVerticalBlockBorderWrapper"] {
     background: linear-gradient(135deg,
-        rgba(13,13,45,0.97) 0%,
-        rgba(7,7,28,0.99) 100%) !important;
-    border: 1px solid #1c1c52 !important;
+        rgba(8,14,30,0.97) 0%,
+        rgba(5,9,20,0.99) 100%) !important;
+    border: 1px solid #0e2040 !important;
     border-radius: 16px !important;
     -webkit-animation: panel-glow 7s ease-in-out infinite;
     animation: panel-glow 7s ease-in-out infinite;
@@ -550,7 +510,7 @@ section[data-testid="stSidebar"] .stButton.home-btn > button:hover {
 [data-testid="stSidebar"] [data-baseweb="select"] > div:first-child,
 [data-testid="stSidebar"] .stButton > button,
 [data-testid="stSidebar"] .home-btn > button {
-    cursor: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 32 32'><text y='28' font-size='26'>🚀</text></svg>") 8 24, pointer !important;
+    cursor: pointer !important;
 }
 
 /* ── Space-themed tabs ── */
@@ -980,13 +940,13 @@ def _render_signal_cards(rows, current_prices, user_id=""):
     four_star     = [r for r in rows if int(r["confidence"]) == 4]
 
     for section_label, icon, section_rows in [
-        ("5-Star MAX Signals", "★★★★★ MAX", five_star_max),
-        ("5-Star Signals", "★★★★★", five_star),
-        ("4-Star Signals", "★★★★☆", four_star),
+        ("Tier 1 · High Conviction", "◆", five_star_max),
+        ("Tier 2 · Confident", "◇", five_star),
+        ("Tier 3 · Qualified", "▪", four_star),
     ]:
         if not section_rows:
             continue
-        is_max_section = section_label == "5-Star MAX Signals"
+        is_max_section = section_label == "Tier 1 · High Conviction"
         hdr_color  = "#40E0FF" if is_max_section else "#8888bb"
         hdr_border = "#003a4a" if is_max_section else "#1c1c4a"
         st.markdown(
@@ -1112,14 +1072,14 @@ def _render_signal_cards(rows, current_prices, user_id=""):
 def show_recommended_view(user_id=""):
     st.markdown(
         '<div style="text-align:center;padding:30px 0 20px 0;">'
-        '<div class="anim-shimmer" style="font-size:38px;font-weight:900;letter-spacing:0.06em;">⭐ Recommended</div>'
+        '<div class="anim-shimmer" style="font-size:32px;font-weight:900;letter-spacing:0.12em;text-transform:uppercase;">Active Signals</div>'
         '</div>',
         unsafe_allow_html=True
     )
 
-    tab_open, tab_history = st.tabs(["📡  LIVE SIGNALS", "🏆  TRADE HISTORY"])
+    tab_open, tab_history = st.tabs(["◆  LIVE SIGNALS", "▶  TRADE HISTORY"])
 
-    # ── Tab 1: Open 4★/5★ signals ────────────────────────────────────────────
+    # ── Tab 1: Open Tier 1–3 signals ─────────────────────────────────────────
     with tab_open:
         try:
             conn = get_conn()
@@ -1146,7 +1106,7 @@ def show_recommended_view(user_id=""):
                 '<div style="text-align:center;padding:60px 20px;">'
                 '<div style="font-size:40px;">🔭</div>'
                 '<div style="font-size:15px;color:#5555aa;margin-top:14px;letter-spacing:0.10em;">'
-                'No open 4★ or 5★ signals on record.<br>'
+                'No open Tier 1–3 signals on record.<br>'
                 '<span style="font-size:12px;">Run the signal engine to generate new signals.</span>'
                 '</div></div>',
                 unsafe_allow_html=True
@@ -1154,7 +1114,7 @@ def show_recommended_view(user_id=""):
         else:
             tickers = list({r["ticker"] for r in open_rows})
             current_prices = {}
-            with st.spinner("📡 Fetching live prices..."):
+            with st.spinner("Fetching live prices..."):
                 try:
                     raw = yf.download(tickers, period="5d", progress=False, auto_adjust=True)
                     if len(tickers) == 1:
@@ -1198,7 +1158,7 @@ def show_recommended_view(user_id=""):
                 '<div style="text-align:center;padding:60px 20px;">'
                 '<div style="font-size:40px;">📭</div>'
                 '<div style="font-size:15px;color:#5555aa;margin-top:14px;letter-spacing:0.10em;">'
-                'No historical 4★ or 5★ signals yet.<br>'
+                'No historical signals yet.<br>'
                 '<span style="font-size:12px;">History will appear here after the daily run fires signals.</span>'
                 '</div></div>',
                 unsafe_allow_html=True
@@ -1302,7 +1262,7 @@ def show_recommended_view(user_id=""):
             st.markdown(
                 '<div style="font-size:11px;color:#8888bb;letter-spacing:0.20em;text-transform:uppercase;'
                 'margin:0 0 12px 0;padding-bottom:8px;border-bottom:1px solid #1c1c4a;">'
-                '📋 &nbsp; All Signals &nbsp; (4★ &amp; 5★ · entered &amp; passed)</div>',
+                '◆ &nbsp; All Signals &nbsp; (Tier 1–3 · entered &amp; passed)</div>',
                 unsafe_allow_html=True
             )
 
@@ -1432,7 +1392,7 @@ def show_positions_view(user_id=""):
             # Fetch live prices
             tickers = list({p["ticker"] for p in open_pos})
             current_prices = {}
-            with st.spinner("📡 Fetching live prices..."):
+            with st.spinner("Fetching live prices..."):
                 try:
                     raw = yf.download(tickers, period="5d", progress=False, auto_adjust=True)
                     if len(tickers) == 1:
@@ -1654,10 +1614,10 @@ def show_positions_view(user_id=""):
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 st.sidebar.markdown(
     '<div style="text-align:center;padding:18px 0 6px 0;">'
-    '<div style="font-size:11px;letter-spacing:0.25em;color:#33337a;text-transform:uppercase;font-weight:700;margin-bottom:10px;">✦ &nbsp; Mission Control &nbsp; ✦</div>'
-    '<div class="anim-float" style="font-size:70px;line-height:1;-webkit-filter:drop-shadow(0 0 22px rgba(220,230,255,0.7)) drop-shadow(0 0 45px rgba(180,200,255,0.35));filter:drop-shadow(0 0 22px rgba(220,230,255,0.7)) drop-shadow(0 0 45px rgba(180,200,255,0.35));">🌙</div>'
-    '<div class="anim-shimmer" style="font-size:26px;font-weight:900;margin:10px 0 2px 0;letter-spacing:0.05em;">To The Moon</div>'
-    '<div style="font-size:10px;color:#2e2e6a;letter-spacing:0.18em;text-transform:uppercase;margin-bottom:4px;">AI Swing Trading Signals</div>'
+    '<div style="font-size:11px;letter-spacing:0.28em;color:#2a3d55;text-transform:uppercase;font-weight:700;margin-bottom:14px;">SIGNAL DASHBOARD</div>'
+    '<div style="font-size:30px;font-weight:900;letter-spacing:0.10em;color:#c8d8f0;line-height:1;">NEXUS</div>'
+    '<div style="font-size:13px;font-weight:700;letter-spacing:0.35em;color:#00C9B1;text-transform:uppercase;margin-bottom:8px;">EDGE</div>'
+    '<div style="font-size:9px;color:#2a3d55;letter-spacing:0.18em;text-transform:uppercase;margin-top:4px;">Systematic Swing Signals · S&amp;P 500</div>'
     '</div>',
     unsafe_allow_html=True
 )
@@ -1713,19 +1673,19 @@ components.html(f"""
 
 st.sidebar.markdown(
     '<div style="padding:4px 0 8px 0;">'
-    '<div style="font-size:9px;color:#8888bb;letter-spacing:0.22em;text-transform:uppercase;margin-bottom:8px;text-align:center;">Trade Tiers</div>'
+    '<div style="font-size:9px;color:#2a3d55;letter-spacing:0.22em;text-transform:uppercase;margin-bottom:8px;text-align:center;">Signal Tiers</div>'
     '<div style="display:flex;flex-direction:column;gap:5px;">'
-    '<div style="display:flex;align-items:center;gap:8px;padding:4px 8px;border-radius:8px;background:rgba(255,255,255,0.03);">'
-    '<span style="font-size:14px;">🥈</span>'
-    '<span style="color:#a0a0c0;font-size:11px;font-weight:700;">4★</span>'
+    '<div style="display:flex;align-items:center;gap:8px;padding:4px 8px;border-radius:8px;background:rgba(255,255,255,0.02);">'
+    '<span style="color:#a0a0c0;font-size:11px;font-weight:700;">TIER 3</span>'
+    '<span style="color:#3a4a5a;font-size:10px;">Qualified</span>'
     '</div>'
-    '<div style="display:flex;align-items:center;gap:8px;padding:4px 8px;border-radius:8px;background:rgba(255,255,255,0.03);">'
-    '<span style="font-size:14px;">🥇</span>'
-    '<span style="color:#f9c846;font-size:11px;font-weight:700;">5★</span>'
+    '<div style="display:flex;align-items:center;gap:8px;padding:4px 8px;border-radius:8px;background:rgba(255,255,255,0.02);">'
+    '<span style="color:#f9c846;font-size:11px;font-weight:700;">TIER 2</span>'
+    '<span style="color:#3a4a5a;font-size:10px;">Confident</span>'
     '</div>'
-    '<div style="display:flex;align-items:center;gap:8px;padding:4px 8px;border-radius:8px;background:rgba(64,224,255,0.05);border:1px solid rgba(64,224,255,0.2);">'
-    '<span style="font-size:14px;">💎</span>'
-    '<span style="color:#40E0FF;font-size:11px;font-weight:900;text-shadow:0 0 8px rgba(64,224,255,0.9),0 0 16px rgba(0,191,255,0.6);">5★ MAX</span>'
+    '<div style="display:flex;align-items:center;gap:8px;padding:4px 8px;border-radius:8px;background:rgba(64,224,255,0.04);border:1px solid rgba(64,224,255,0.15);">'
+    '<span style="color:#40E0FF;font-size:11px;font-weight:900;text-shadow:0 0 8px rgba(64,224,255,0.8);">TIER 1</span>'
+    '<span style="color:#3a4a5a;font-size:10px;">High Conviction</span>'
     '</div>'
     '</div>'
     '</div>',
@@ -1826,10 +1786,8 @@ st.sidebar.divider()
 
 st.sidebar.markdown(
     '<div style="text-align:center;padding:8px 0 4px 0;">'
-    '<div style="font-size:28px;-webkit-filter:drop-shadow(0 0 10px rgba(100,180,255,0.5));filter:drop-shadow(0 0 10px rgba(100,180,255,0.5));">🌙</div>'
-    '<div style="font-size:10px;color:#8888bb;letter-spacing:0.15em;text-transform:uppercase;margin-top:6px;">📡 &nbsp; Deep Space Network</div>'
-    '<div style="font-size:10px;color:#8888bb;margin-top:3px;">Data: yfinance &nbsp;·&nbsp; AI: Claude</div>'
-    '<div style="margin-top:10px;font-size:16px;letter-spacing:4px;color:#44446a;">✦ ✧ ✦ ✧ ✦</div>'
+    '<div style="font-size:10px;color:#2a3d55;letter-spacing:0.15em;text-transform:uppercase;">Data: yfinance &nbsp;·&nbsp; AI: Claude</div>'
+    '<div style="margin-top:8px;font-size:11px;letter-spacing:5px;color:#1a2d40;">· · · · ·</div>'
     '</div>',
     unsafe_allow_html=True
 )
@@ -1838,22 +1796,16 @@ st.sidebar.markdown(
 # ── Main header ────────────────────────────────────────────────────────────────
 st.markdown(
     '<div style="text-align:center;padding:40px 0 16px 0;">'
-    '<div style="display:flex;justify-content:center;align-items:center;gap:28px;margin-bottom:12px;">'
-    '<div class="anim-float-r" style="font-size:40px;-webkit-filter:drop-shadow(0 0 14px rgba(100,180,255,0.5));filter:drop-shadow(0 0 14px rgba(100,180,255,0.5));">🌍</div>'
-    '<div style="font-size:72px;line-height:1;-webkit-filter:drop-shadow(0 0 20px rgba(255,200,80,0.4));filter:drop-shadow(0 0 20px rgba(255,200,80,0.4));">🚀</div>'
-    '<div class="anim-float" style="font-size:50px;-webkit-filter:drop-shadow(0 0 18px rgba(220,230,255,0.7));filter:drop-shadow(0 0 18px rgba(220,230,255,0.7));">🌙</div>'
-    '</div>'
-    '<div class="anim-shimmer" style="font-size:48px;font-weight:900;letter-spacing:0.06em;margin:4px 0 8px 0;line-height:1.1;">To The Moon</div>'
-    '<div style="display:flex;align-items:center;justify-content:center;gap:10px;">'
-    '<div style="font-size:13px;color:#8888bb;letter-spacing:0.22em;text-transform:uppercase;">✦ &nbsp; AI-Powered Swing Trading Signals &nbsp; ✦</div>'
-    '<span style="font-size:10px;font-weight:800;color:#1a1a2e;background:#40E0FF;border-radius:6px;padding:2px 7px;letter-spacing:0.08em;">V2</span>'
-    '</div>'
-    '<div style="margin-top:16px;display:inline-flex;align-items:center;gap:4px;'
-    'background:rgba(255,255,255,0.03);border:1px solid #1c1c4a;border-radius:20px;padding:6px 16px;">'
-    '<span style="font-size:9px;color:#8888bb;letter-spacing:0.18em;text-transform:uppercase;font-weight:700;margin-right:8px;">Tiers</span>'
-    '<span style="font-size:13px;margin-right:2px;">🥈</span><span style="color:#a0a0c0;font-size:10px;font-weight:700;margin-right:10px;">4★</span>'
-    '<span style="font-size:13px;margin-right:2px;">🥇</span><span style="color:#f9c846;font-size:10px;font-weight:700;margin-right:10px;">5★</span>'
-    '<span style="font-size:13px;margin-right:2px;">💎</span><span style="color:#40E0FF;font-size:10px;font-weight:900;text-shadow:0 0 8px rgba(64,224,255,0.9),0 0 16px rgba(0,191,255,0.6);">5★ MAX</span>'
+    '<div class="anim-shimmer" style="font-size:52px;font-weight:900;letter-spacing:0.08em;margin:0 0 6px 0;line-height:1.0;">NEXUS EDGE</div>'
+    '<div style="font-size:11px;color:#2a3d55;letter-spacing:0.28em;text-transform:uppercase;margin-bottom:18px;">Systematic Swing Signals &nbsp;·&nbsp; S&amp;P 500</div>'
+    '<div style="display:inline-flex;align-items:center;gap:14px;'
+    'background:rgba(255,255,255,0.02);border:1px solid #0e2040;border-radius:20px;padding:7px 22px;">'
+    '<span style="font-size:9px;color:#2a3d55;letter-spacing:0.20em;text-transform:uppercase;font-weight:700;margin-right:4px;">Signal Tiers</span>'
+    '<span style="color:#a8a8c0;font-size:10px;font-weight:700;">TIER 3</span>'
+    '<span style="color:#2a3d55;font-size:10px;">·</span>'
+    '<span style="color:#f9c846;font-size:10px;font-weight:700;">TIER 2 &nbsp;CONFIDENT</span>'
+    '<span style="color:#2a3d55;font-size:10px;">·</span>'
+    '<span style="color:#40E0FF;font-size:10px;font-weight:900;text-shadow:0 0 8px rgba(64,224,255,0.8);">TIER 1 &nbsp;HIGH CONVICTION</span>'
     '</div>'
     '</div>',
     unsafe_allow_html=True
@@ -1862,7 +1814,7 @@ st.markdown(
 # ── Mobile nav bar ─────────────────────────────────────────────────────────────
 _mc1, _mc2, _mc3 = st.columns(3)
 with _mc1:
-    if st.button("⭐  Recommended", use_container_width=True, key="mob_rec"):
+    if st.button("◆  Signals", use_container_width=True, key="mob_rec"):
         st.session_state.show_recommended = not st.session_state.show_recommended
         st.session_state.show_positions = False
         st.rerun()
@@ -1898,8 +1850,7 @@ if auto_run:
 if not auto_run and not st.session_state.get("results"):
     st.markdown(
         '<div style="text-align:center;padding:40px 20px;">'
-        '<div style="font-size:36px;margin-bottom:12px;">🛸</div>'
-        '<div style="font-size:15px;letter-spacing:0.12em;text-transform:uppercase;color:#e8e8f8;">Select a target from Mission Control to begin analysis.</div>'
+        '<div style="font-size:15px;letter-spacing:0.12em;text-transform:uppercase;color:#4a5a7a;margin-bottom:8px;">◈ &nbsp; Select a ticker from the watchlist to begin analysis.</div>'
         '</div>',
         unsafe_allow_html=True
     )
@@ -1912,13 +1863,17 @@ if not selected_tickers:
 cached_tickers = st.session_state.get("results_tickers", [])
 if auto_run or selected_tickers != cached_tickers:
     results = []
-    progress = st.progress(0, text="📡 Establishing deep space connection...")
+    # Load sector data once for E5 (cached, fast on repeat runs)
+    _sp500_sectors = _get_sp500_sector_map_cached()
+    _hot_etfs      = _get_hot_sectors_cached()
+    progress = st.progress(0, text="Initializing analysis...")
     for i, ticker in enumerate(selected_tickers):
         progress.progress((i + 1) / len(selected_tickers), text=f"🔭 Scanning {ticker}...")
         try:
             df   = fetch_price_data(ticker)
             ind  = compute_indicators(df, ticker)
             fund = fetch_fundamentals(ticker)
+            extra_sigs = []
             if is_demo_mode():
                 sig = mock_signal(ticker)
             else:
@@ -1931,7 +1886,15 @@ if auto_run or selected_tickers != cached_tickers:
                         sig["signal"] = "NO TRADE"
                 if sig["signal"] in ("BUY", "SELL"):
                     save_signal(ticker, sig, ind["latest_close"])
-            results.append({"ticker": ticker, "ind": ind, "sig": sig, "df": df, "fund": fund})
+                # Engine 5: Sector Hunter
+                _sector = _sp500_sectors.get(ticker)
+                if _sector and _hot_etfs:
+                    sig_e5 = get_sector_hunter_signal(ticker, _sector, ind, _hot_etfs)
+                    if sig_e5.get("signal") == "BUY":
+                        save_signal(ticker, sig_e5, ind["latest_close"])
+                        extra_sigs.append(sig_e5)
+            results.append({"ticker": ticker, "ind": ind, "sig": sig, "df": df, "fund": fund,
+                            "extra_sigs": extra_sigs})
         except Exception as _scan_err:
             results.append({
                 "ticker": ticker, "ind": None, "sig": {
@@ -1939,18 +1902,18 @@ if auto_run or selected_tickers != cached_tickers:
                     "rationale": f"Analysis failed: {_scan_err}",
                     "strategies_aligned": [], "fundamentals_bonus": False,
                     "entry_zone": None, "stop_loss": None, "target": None,
-                }, "df": None, "fund": None,
+                }, "df": None, "fund": None, "extra_sigs": [],
             })
     progress.empty()
     st.session_state.results         = results
     st.session_state.results_tickers = selected_tickers
     st.session_state.analyzed        = True
-    st.success(f"✅ Transmission complete — {len(results)} target(s) analyzed.")
+    st.success(f"✅ Analysis complete — {len(results)} ticker(s) processed.")
     st.rerun()
 else:
     results = st.session_state.results
 
-st.markdown('<hr style="border:none;height:1px;background:linear-gradient(90deg,transparent,#2a2a6a,#5533cc,#2a2a6a,transparent);margin:24px 0;">', unsafe_allow_html=True)
+st.markdown('<hr style="border:none;height:1px;background:linear-gradient(90deg,transparent,#0e2040,#00C9B1,#0e2040,transparent);margin:24px 0;">', unsafe_allow_html=True)
 
 
 # ── Per-stock display ──────────────────────────────────────────────────────────
@@ -2009,7 +1972,7 @@ for item in results:
         macd_label = f"MACD {ind['macd_crossover'].title()}"
 
         with st.container(border=True):
-            st.markdown('<div class="panel-title">📡 &nbsp; RSI Indicator</div>', unsafe_allow_html=True)
+            st.markdown('<div class="panel-title">RSI Indicator</div>', unsafe_allow_html=True)
             st.plotly_chart(rsi_gauge(ind["rsi"]), use_container_width=True, config={"displayModeBar": False})
             st.markdown(
                 f'<div style="text-align:center;margin-top:2px;">'
@@ -2062,7 +2025,7 @@ for item in results:
         details_content = f'<div class="rationale" style="margin-top:10px;">{rationale}</div>{entry_html}'
         st.markdown(
             f'<div class="panel">'
-            f'<div class="panel-title">🛸 &nbsp; Signal</div>'
+            f'<div class="panel-title">Signal</div>'
             f'{signal_html}'
             f'{conf_html}'
             f'<details class="signal-details">'
@@ -2072,6 +2035,25 @@ for item in results:
             f'</div>',
             unsafe_allow_html=True
         )
+
+    # ── Engine 5 Sector Hunter signal (if fired alongside E1) ────────────────
+    for _e5 in item.get("extra_sigs", []):
+        if _e5.get("signal") == "BUY":
+            _e5_stars = _e5["confidence_stars"]
+            _e5_star_lbl = "TIER 1" if _e5_stars >= 6 else "TIER 2" if _e5_stars >= 5 else "TIER 3"
+            st.markdown(
+                f'<div style="margin:10px 0 4px 0;padding:12px 18px;'
+                f'background:rgba(80,200,120,0.08);border:1px solid rgba(80,200,120,0.35);'
+                f'border-radius:10px;">'
+                f'<div style="font-weight:800;color:#80ffaa;font-size:13px;margin-bottom:4px;">'
+                f'🔍 &nbsp; SECTOR HUNTER &nbsp;{_e5_star_lbl}</div>'
+                f'<div style="font-size:12px;color:#b0e8c8;line-height:1.55;">{_e5["rationale"]}</div>'
+                f'<div style="margin-top:8px;font-size:11px;color:#607870;">'
+                f'Entry {_e5["entry_zone"]} &nbsp;·&nbsp; Stop {_e5["stop_loss"]} '
+                f'&nbsp;·&nbsp; Target {_e5["target"]}</div>'
+                f'</div>',
+                unsafe_allow_html=True
+            )
 
     # ── Panel 3: 52-Week Range ────────────────────────────────────────────────
     pct_from_high = (ind["week52_high"] - ind["latest_close"]) / ind["latest_close"] * 100
@@ -2170,7 +2152,7 @@ for item in results:
         )
 
     if fund.get("fundamentals_strong"):
-        bonus_html = '<div class="fund-bonus-badge">⭐ Strong Fundamentals · +1 Star Bonus Active</div>'
+        bonus_html = '<div class="fund-bonus-badge">◆ Strong Fundamentals · +1 Tier Bonus Active</div>'
     else:
         bonus_html = '<div class="fund-bonus-badge fund-bonus-none">Fundamentals: No bonus triggered</div>'
 
