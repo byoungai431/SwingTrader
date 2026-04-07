@@ -239,14 +239,15 @@ def get_index_fade_signal(base_ticker: str, indicators: dict) -> dict:
 
     # Mirrors backtest: requires BOTH RSI >= 80 AND price >= BB Upper (tight filter)
     if rsi >= 80 and bb_upper is not None and close >= bb_upper:
-        stars = 5 if rsi >= 85 else 4
+        _high_conv = rsi >= 85  # mirrors backtest: levered OR RSI>=85 gets extreme TP
+        stars = 6  # 5 star max (blue diamond) — RSI 80+ AND upper BB is max conviction for E2
         strategies = [f"Overbought Fade (RSI {rsi:.1f} ≥ 80)", "BB Upper Band Breach"]
 
-        tp_pct = 0.10 if stars >= 5 else 0.05
+        tp_pct = 0.10 if _high_conv else 0.05
         stop_pct = 0.05
 
         rationale = (
-            f"{stars}★ INDEX FADE: {base_ticker} Overbought. "
+            f"5 star max (blue diamond) INDEX FADE: {base_ticker} Overbought. "
             f"BUY {inverse_ticker}. Target {tp_pct*100:.0f}%, Stop {stop_pct*100:.0f}%."
         )
 
@@ -367,6 +368,73 @@ def get_leveraged_signal(base_ticker: str, indicators: dict) -> dict:
                     }
 
     return _NO_TRADE
+
+
+# ── ENGINE 4: SPY REGIME MOMENTUM (UPRO) ─────────────────────────────────────
+# Mirrors backtest_master.py Engine 4 logic:
+#   Confirmed Bull: SPY above MA50 AND MA50 > MA200 (golden cross)
+#                   SMA RSI 50-72, 20d momentum >= 2%
+#   Pullback gate:  SPY SMA RSI pulled back to <= 52 in last 10 days
+#   Strategy B:     UPRO Bull Hold — 35% TP, 17% trail trigger → 10% trail, 30d churn
+#   Regime Exit:    SPY closes below MA50 for 5 consecutive days
+def get_regime_signal(spy_indicators: dict) -> dict:
+    _NO_TRADE = {
+        "ticker": "UPRO", "signal": "NO TRADE", "confidence_stars": 0,
+        "strategies_aligned": [], "fundamentals_bonus": False,
+        "rationale": "SPY Regime not confirmed for UPRO entry.",
+        "entry_zone": None, "stop_loss": None, "target": None,
+    }
+
+    spy_close            = spy_indicators.get("latest_close")
+    spy_ma50             = spy_indicators.get("ma50")
+    spy_ma200            = spy_indicators.get("ma200")
+    spy_smarsi           = spy_indicators.get("sma_rsi")       # SMA-based RSI for Engine 4
+    spy_ret20            = spy_indicators.get("ret20")          # 20-day momentum
+    spy_ma50_breach_days = spy_indicators.get("ma50_breach_days", 0)
+    recent_rsi_min       = spy_indicators.get("sma_rsi_10d_min")
+
+    if any(v is None for v in [spy_close, spy_ma50, spy_ma200, spy_smarsi]):
+        return _NO_TRADE
+
+    # 5-day breach rule — regime is broken, stay out
+    if spy_ma50_breach_days >= 5:
+        return {**_NO_TRADE, "rationale": f"SPY Regime EXIT: MA50 breached for {spy_ma50_breach_days} consecutive days."}
+
+    # Confirmed bull: golden cross + RSI 50-72 + 20d momentum >= 2%
+    ret20 = spy_ret20 or 0
+    confirmed_bull = (
+        spy_close > spy_ma50
+        and spy_ma50 > spy_ma200
+        and 50 <= spy_smarsi <= 72
+        and ret20 >= 0.02
+    )
+
+    if not confirmed_bull:
+        return {**_NO_TRADE, "rationale": f"SPY not in confirmed bull regime (RSI: {spy_smarsi:.1f}, Golden Cross: {spy_ma50 > spy_ma200}, 20d mom: {ret20:.1%})."}
+
+    # Pullback filter: SPY SMA RSI pulled back to <= 52 in last 10 days
+    if recent_rsi_min is None or recent_rsi_min > 52:
+        return {**_NO_TRADE, "rationale": f"SPY confirmed bull but no RSI pullback (<=52) in last 10 days. Min: {recent_rsi_min}."}
+
+    return {
+        "ticker":             "UPRO",
+        "signal":             "BUY",
+        "confidence_stars":   5,   # 5 star (gold stars) — Regime Momentum
+        "strategies_aligned": [
+            "SPY Golden Cross (MA50 > MA200)",
+            f"SPY RSI Pullback (10d min: {recent_rsi_min:.1f} <= 52)",
+            f"SPY 20d Momentum: {ret20:.1%}",
+        ],
+        "fundamentals_bonus": False,
+        "rationale": (
+            f"5 star (gold stars) REGIME MOMENTUM: SPY confirmed bull + RSI pullback. BUY UPRO. "
+            f"35% TP, 17% trail trigger → 10% trail, 40% floor stop, 30-day churn. "
+            f"Regime exits if SPY closes below MA50 for 5 consecutive days."
+        ),
+        "entry_zone": "Market Open",
+        "stop_loss":   "-40% floor / 10% trail after +17%",
+        "target":      "+35% or 30-day churn",
+    }
 
 
 if __name__ == "__main__":

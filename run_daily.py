@@ -20,7 +20,7 @@ import pandas as pd
 from config import WATCHLIST, HISTORY_DAYS, ANTHROPIC_API_KEY, VIX_MAX
 from indicators import compute_indicators
 from fundamentals import fetch_fundamentals
-from signal_engine import get_signal, get_index_fade_signal, get_leveraged_signal
+from signal_engine import get_signal, get_index_fade_signal, get_leveraged_signal, get_regime_signal
 from history import save_signal, get_performance_stats, get_conn
 from notify import send_telegram, send_daily_summary, send_daily_telegram, send_push, send_exit_alert
 
@@ -404,6 +404,12 @@ def run():
             sig_lev = get_leveraged_signal(ticker, ind)
             if sig_lev.get("signal") in ("BUY", "SELL"):
                 generated_signals.append(sig_lev)
+
+            # Engine 4: SPY Regime Momentum — only fires once when ticker is SPY
+            if ticker == "SPY":
+                sig_regime = get_regime_signal(ind)
+                if sig_regime.get("signal") == "BUY":
+                    generated_signals.append(sig_regime)
 
             if not generated_signals:
                 generated_signals.append({"ticker": ticker, "signal": "NO TRADE", "confidence_stars": 0, "rationale": "No conditions met."})

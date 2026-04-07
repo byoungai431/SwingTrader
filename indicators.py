@@ -136,6 +136,33 @@ def compute_indicators(df: pd.DataFrame, ticker: str | None = None) -> dict:
     prev_rsi       = round(rsi_series.iloc[-2], 2) if len(close) >= 2 else None
     prev2_rsi      = round(rsi_series.iloc[-3], 2) if len(close) >= 3 else None
 
+    # ── Engine 4: SPY Regime indicators (SMA RSI, 20d momentum, breach tracking) ──
+    # SMA-based RSI (rolling mean, not EMA) — matches backtest_master.py Engine 4
+    delta_e4 = close.diff()
+    gain_e4  = (delta_e4.where(delta_e4 > 0, 0)).rolling(window=14).mean()
+    loss_e4  = (-delta_e4.where(delta_e4 < 0, 0)).rolling(window=14).mean()
+    rs_e4    = gain_e4 / loss_e4.replace(0, float("nan"))
+    sma_rsi_series = (100 - (100 / (1 + rs_e4)))
+    sma_rsi = round(float(sma_rsi_series.iloc[-1]), 2) if len(close) >= 14 else None
+
+    # 20-day price momentum (for regime entry filter: >= 2%)
+    ret20 = round(float(close.pct_change(20).iloc[-1]), 4) if len(close) >= 21 else None
+
+    # Consecutive days SPY has closed below MA50 (for 5-day breach / regime exit)
+    ma50_series = close.rolling(50).mean()
+    ma50_breach_days = 0
+    if len(close) >= 50:
+        for i in range(1, min(11, len(close))):
+            if close.iloc[-i] < ma50_series.iloc[-i]:
+                ma50_breach_days += 1
+            else:
+                break
+
+    # 10-day minimum of SMA RSI (pullback filter for Engine 4 entry)
+    sma_rsi_10d_min = None
+    if sma_rsi_series is not None and len(sma_rsi_series.dropna()) >= 10:
+        sma_rsi_10d_min = round(float(sma_rsi_series.iloc[-10:].min()), 2)
+
     return {
         "rsi": rsi,
         "rsi_label": rsi_label,
@@ -176,6 +203,11 @@ def compute_indicators(df: pd.DataFrame, ticker: str | None = None) -> dict:
         "sr_levels": sr_levels,
         "earnings_date": earnings["earnings_date"],
         "days_to_earnings": earnings["days_to_earnings"],
+        # Engine 4 regime indicators
+        "sma_rsi": sma_rsi,
+        "ret20": ret20,
+        "ma50_breach_days": ma50_breach_days,
+        "sma_rsi_10d_min": sma_rsi_10d_min,
     }
 
 
