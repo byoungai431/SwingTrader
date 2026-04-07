@@ -437,6 +437,145 @@ def get_regime_signal(spy_indicators: dict) -> dict:
     }
 
 
+# ── ENGINE 5: SECTOR HUNTER ──────────────────────────────────────────────────
+E5_SECTOR_ETF_MAP = {
+    "Information Technology": "XLK",
+    "Health Care":            "XLV",
+    "Financials":             "XLF",
+    "Consumer Discretionary": "XLY",
+    "Communication Services": "XLC",
+    "Industrials":            "XLI",
+    "Consumer Staples":       "XLP",
+    "Energy":                 "XLE",
+    "Utilities":              "XLU",
+    "Real Estate":            "XLRE",
+    "Materials":              "XLB",
+}
+
+E5_EXCLUDED_SECTORS = {
+    "Communication Services", "Consumer Staples", "Materials", "Energy", "Utilities"
+}
+
+E5_SECTOR_STARS = {
+    "Health Care": 6, "Industrials": 6, "Real Estate": 6,   # 5★ MAX DIAMOND
+    "Financials": 4, "Information Technology": 4, "Consumer Discretionary": 4,
+}
+
+_E5_TOP_N     = 3
+_E5_RS_SHORT  = 20
+_E5_RS_LONG   = 60
+_E5_RS_SLOPE  = 5
+_E5_ENTRY_RSI = 40
+
+
+def compute_hot_sectors() -> set:
+    """Download sector ETF + SPY data and return the set of hot sector ETF tickers today.
+    Hot = top-3 by blended RS rank AND positive 5-day RS slope (mirrors backtest logic).
+    """
+    import numpy as np
+    import pandas as pd
+
+    etfs = list(E5_SECTOR_ETF_MAP.values())
+    try:
+        raw   = yf.download(etfs + ["SPY"], period="120d", progress=False, auto_adjust=True)
+        close = raw["Close"]
+        spy   = close["SPY"] if "SPY" in close.columns else None
+        if spy is None:
+            return set()
+
+        rs_data  = {etf: close[etf] / spy.replace(0, float("nan"))
+                    for etf in etfs if etf in close.columns}
+        rs_df    = pd.DataFrame(rs_data).dropna(how="all")
+        rs_short = rs_df.pct_change(_E5_RS_SHORT)
+        rs_long  = rs_df.pct_change(_E5_RS_LONG)
+        avg_rank = (rs_short.rank(axis=1, ascending=False) +
+                    rs_long.rank(axis=1, ascending=False)) / 2.0
+        rs_slope = rs_df.diff(_E5_RS_SLOPE)
+
+        today_rank  = avg_rank.iloc[-1]
+        today_slope = rs_slope.iloc[-1]
+
+        hot = set()
+        for etf in etfs:
+            if etf not in today_rank.index:
+                continue
+            rank, slope = today_rank[etf], today_slope[etf]
+            if pd.isna(rank) or pd.isna(slope):
+                continue
+            if rank <= _E5_TOP_N and slope > 0:
+                hot.add(etf)
+        return hot
+    except Exception:
+        return set()
+
+
+def get_sector_hunter_signal(ticker: str, sector: str, indicators: dict,
+                              hot_sector_etfs: set) -> dict:
+    """Engine 5: return a BUY signal if the stock's sector is hot and entry criteria are met."""
+    _NO_TRADE = {
+        "ticker": ticker, "signal": "NO TRADE", "confidence_stars": 0,
+        "strategies_aligned": [], "fundamentals_bonus": False,
+        "rationale": "E5 Sector Hunter: conditions not met.",
+        "entry_zone": None, "stop_loss": None, "target": None,
+    }
+
+    if not sector or sector in E5_EXCLUDED_SECTORS:
+        return _NO_TRADE
+
+    sector_etf = E5_SECTOR_ETF_MAP.get(sector)
+    if not sector_etf or sector_etf not in hot_sector_etfs:
+        return _NO_TRADE
+
+    rsi     = indicators.get("rsi")
+    close   = indicators.get("latest_close")
+    prev_cl = indicators.get("prev_close")
+    prev2   = indicators.get("prev2_close")
+    ma20    = indicators.get("ma20")
+    ma50    = indicators.get("ma50")
+    ma200   = indicators.get("ma200")
+
+    if any(v is None for v in [rsi, close, prev_cl, prev2, ma20, ma50]):
+        return _NO_TRADE
+
+    # SPY regime gate (bull market only)
+    if ma200 is not None and close < ma200:
+        return _NO_TRADE
+
+    # RSI oversold — lagging the hot sector
+    if rsi >= _E5_ENTRY_RSI:
+        return _NO_TRADE
+
+    # 2 consecutive green closes
+    if not (close > prev_cl and prev_cl > prev2):
+        return _NO_TRADE
+
+    # Price proximity to MA20/MA50 (within 5%)
+    if not (close <= ma20 * 1.05 and close >= ma50 * 0.95):
+        return _NO_TRADE
+
+    stars = E5_SECTOR_STARS.get(sector, 4)
+
+    return {
+        "ticker":             ticker,
+        "signal":             "BUY",
+        "confidence_stars":   stars,
+        "strategies_aligned": [
+            f"Sector Hunter: {sector} top-{_E5_TOP_N} by RS ({sector_etf} leading SPY)",
+            f"Oversold RSI {rsi:.1f} < {_E5_ENTRY_RSI} — lagging hot sector",
+            "2 consecutive green closes (momentum confirmation)",
+        ],
+        "fundamentals_bonus": False,
+        "rationale": (
+            f"{'5★ MAX' if stars >= 6 else '5★' if stars >= 5 else '4★'} SECTOR HUNTER: {sector} is top-{_E5_TOP_N} "
+            f"by relative strength. {ticker} RSI {rsi:.1f} — oversold within leading sector. "
+            f"Entry ${close:.2f}, TP +25%, Hard Stop -12%, Max Hold 30d."
+        ),
+        "entry_zone": f"${close:.2f}",
+        "stop_loss":  "-12%",
+        "target":     "+25%",
+    }
+
+
 if __name__ == "__main__":
     from fetcher import fetch_price_data
     from indicators import compute_indicators

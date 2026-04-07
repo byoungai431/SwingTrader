@@ -20,7 +20,8 @@ import pandas as pd
 from config import WATCHLIST, HISTORY_DAYS, ANTHROPIC_API_KEY, VIX_MAX
 from indicators import compute_indicators
 from fundamentals import fetch_fundamentals
-from signal_engine import get_signal, get_index_fade_signal, get_leveraged_signal, get_regime_signal
+from signal_engine import (get_signal, get_index_fade_signal, get_leveraged_signal, get_regime_signal,
+                           compute_hot_sectors, get_sector_hunter_signal, E5_SECTOR_ETF_MAP)
 from history import save_signal, get_performance_stats, get_conn
 from notify import send_telegram, send_daily_summary, send_daily_telegram, send_push, send_exit_alert
 
@@ -64,6 +65,25 @@ def _get_sp500_tickers():
     except Exception as e:
         print(f"  WARNING: Could not fetch S&P 500 list ({e}). Falling back to watchlist.")
         return list(WATCHLIST)
+
+
+def _get_sp500_sector_map() -> dict:
+    """Fetch S&P 500 tickers and GICS sectors from Wikipedia. Returns {ticker: sector}."""
+    import urllib.request
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    })
+    try:
+        with urllib.request.urlopen(req) as resp:
+            html = resp.read().decode("utf-8")
+        table = pd.read_html(html)[0]
+        table["Symbol"] = table["Symbol"].str.replace(".", "-", regex=False)
+        return dict(zip(table["Symbol"], table["GICS Sector"]))
+    except Exception as e:
+        print(f"  WARNING: Could not fetch S&P 500 sector map ({e}).")
+        return {}
 
 
 def _get_vix() -> float | None:
@@ -341,6 +361,12 @@ def run():
 
     source   = f"S&P 500 + Indices ({len(universe)} items)" if USE_SP500 else f"Watchlist ({len(universe)} stocks)"
 
+    # ── Engine 5: pre-compute sector RS rankings ───────────────────────────────
+    _sector_map = _get_sp500_sector_map() if USE_SP500 else {}
+    _hot_etfs   = compute_hot_sectors()
+    _etf_to_sec = {v: k for k, v in E5_SECTOR_ETF_MAP.items()}
+    hot_sectors_str = ", ".join(_etf_to_sec.get(e, e) for e in sorted(_hot_etfs)) or "none"
+
     # ── Market regime check ────────────────────────────────────────────────────
     vix_level   = _get_vix()
     buy_blocked = VIX_MAX is not None and vix_level is not None and vix_level > VIX_MAX
@@ -359,6 +385,7 @@ def run():
     print(f"  Universe: {source}")
     print(f"  Regime:   {regime_label}")
     print(f"  5★ Entry: {star5_label}")
+    print(f"  E5 Hot Sectors: {hot_sectors_str}")
     print(f"{'='*60}\n")
 
     results          = {"BUY": [], "SELL": [], "NO TRADE": [], "ERROR": []}
@@ -410,6 +437,13 @@ def run():
                 sig_regime = get_regime_signal(ind)
                 if sig_regime.get("signal") == "BUY":
                     generated_signals.append(sig_regime)
+
+            # Engine 5: Sector Hunter — S&P 500 stocks only (not ETFs/indices)
+            _e5_sector = _sector_map.get(ticker)
+            if _e5_sector and _hot_etfs:
+                sig_e5 = get_sector_hunter_signal(ticker, _e5_sector, ind, _hot_etfs)
+                if sig_e5.get("signal") == "BUY":
+                    generated_signals.append(sig_e5)
 
             if not generated_signals:
                 generated_signals.append({"ticker": ticker, "signal": "NO TRADE", "confidence_stars": 0, "rationale": "No conditions met."})
