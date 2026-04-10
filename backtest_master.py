@@ -1,16 +1,20 @@
 """
-backtest_master.py — The Ultimate All-Weather 3-Track Combined Backtest
+backtest_master.py — The Ultimate All-Weather 6-Engine Combined Backtest
 =======================================================================
-Runs all three engines independently on a shared account:
-1 - CORE SWING: Oversold pullbacks in Bull Regimes on S&P 500
-2 - INDEX FADE: Fading RSI > 80 via Inverse ETFs
-3 - LEVERAGED BOUNCE: Catching pure Capitulation via 3x ETFs
+Runs all engines independently on a shared account:
+1 - CORE SWING:        Oversold pullbacks in Bull Regimes on S&P 500
+2 - INDEX FADE:        Fading RSI > 80 via Inverse ETFs
+3 - LEVERAGED BOUNCE:  Catching pure Capitulation via 3x ETFs
+4 - REGIME MOMENTUM:   SPY trend-following via UPRO
+5 - SECTOR HUNTER:     Oversold dips in hot sectors
+6 - RANGE REVERSION:   BB mean-reversion in sideways/chop markets
 
 Period: 2010-01-01 → 2026-01-01
 """
 
 import io
 import os
+import re
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -119,15 +123,101 @@ RG_UPRO_TRAIL_PCT     = 0.10
 RG_UPRO_FLOOR_PCT     = 0.12
 RG_UPRO_MAX_HOLD      = 90
 RG_BULL_TP_PCT        = 0.35   # Strategy B TP (Churn)
-RG_BULL_SL_PCT        = 0.40   
+RG_BULL_SL_PCT        = 0.40
 RG_BULL_MAX_DAYS      = 30     # 30-day Churn
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# ENGINE 5 — SECTOR HUNTER config
+# ═══════════════════════════════════════════════════════════════════════════════
+E5_TOP_N_SECTORS        = 3      # Hot sectors to qualify (top N by blended RS rank)
+E5_RS_WINDOW_SHORT      = 20     # Short RS lookback (trading days)
+E5_RS_WINDOW_LONG       = 60     # Long RS lookback (trading days)
+E5_RS_SLOPE_WINDOW      = 5      # Days for RS slope trajectory check
+E5_ENTRY_RSI_MAX        = 40     # Max RSI for oversold entry
+E5_MAX_HOLD             = 30     # Max holding period (trading days)
+E5_TP_PCT               = 0.25   # Take-profit: +25%
+E5_SL_PCT               = 0.12   # Hard stop-loss: -12%
+E5_TRAIL_TRIGGER        = 0.08   # Trailing stop activates after +8% gain
+E5_TRAIL_PCT            = 0.04   # Trail 4% below peak (locks in ~4% min profit)
+E5_STALE_CUT_DAYS       = 15     # Exit if still negative after this many hold days
+E5_LADDER_TRIGGER       = 0.03   # Ladder buy when winning position pulls back near MA20
+E5_LADDER_RSI_MAX       = 50     # Max RSI for ladder buy confirmation
+E5_COOLDOWN_BARS        = 3      # Cooldown bars after a stop-loss exit
+E5_STOCK_LOSS_STREAK    = 2      # Consecutive losses on same stock before cooldown
+E5_STOCK_LOSS_COOLDOWN  = 5      # Cooldown bars after hitting stock loss streak
+E5_GLOBAL_LOSS_STREAK   = 3      # Consecutive losses across ALL trades before engine-wide pause
+E5_GLOBAL_COOLDOWN_DAYS = 7      # Business days to block all new entries after global streak
 
+E5_EXCLUDED_SECTORS = {
+    "Communication Services",
+    "Consumer Staples",
+    "Materials",
+    "Energy",
+    "Utilities",
+}
 
+E5_SECTOR_STARS = {
+    "Health Care":            5,   # Blue Diamond — 1.3× position size
+    "Industrials":            5,   # Blue Diamond — 1.3× position size
+    "Real Estate":            5,   # Blue Diamond — 1.3× position size
+    "Financials":             4,
+    "Information Technology": 4,
+    "Consumer Discretionary": 4,
+}
+
+E5_SECTOR_ETF_MAP = {
+    "Information Technology": "XLK",
+    "Health Care":            "XLV",
+    "Financials":             "XLF",
+    "Consumer Discretionary": "XLY",
+    "Communication Services": "XLC",
+    "Industrials":            "XLI",
+    "Consumer Staples":       "XLP",
+    "Energy":                 "XLE",
+    "Utilities":              "XLU",
+    "Real Estate":            "XLRE",
+    "Materials":              "XLB",
+}
+E5_SECTOR_ETFS = list(E5_SECTOR_ETF_MAP.values())
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ENGINE 6 — RANGE REVERSION config
+# ═══════════════════════════════════════════════════════════════════════════════
+E6_BB_PERIOD           = 20
+E6_BB_STD              = 2.0
+E6_VOL_SPIKE_MIN       = 1.5
+E6_ADX_MIN             = 10
+E6_ADX_MAX             = 22
+E6_ADX_PERIOD          = 14
+E6_RSI_MIN             = 35
+E6_RSI_MAX             = 65
+E6_CHOP_BARS           = 7
+E6_RANGE_BARS          = 10
+E6_DIP_LOOKBACK        = 10
+E6_DIP_MIN_PCT         = 0.02
+E6_DIP_AVOID_LOW       = 0.05
+E6_DIP_AVOID_HIGH      = 0.09
+E6_DEEP_REBOUND_PCT    = 0.08
+E6_STRONG_RECOVER_PCT  = 0.05
+E6_SHALLOW_RECOVER_PCT = 0.08
+E6_STOP_PCT            = 0.06
+E6_TP_PCT              = 0.10
+E6_STALE_CUT_DAYS      = 12
+E6_MAX_HOLD            = 25
+E6_COOLDOWN_BARS       = 1
+E6_CONSEC_LOSS_LIMIT   = 5
+E6_CONSEC_LOSS_LIMIT2  = 3
+E6_LOSS_COOLDOWN_DAYS  = 15
+E6_LOSS_COOLDOWN_DAYS2 = 7
+E6_TRAIL_ACTIVATE_PCT  = 0.08
+E6_TRAIL_DISTANCE_PCT  = 0.04
+TIER1_SIZE_MULT        = 1.50
+TIER2_SIZE_MULT        = 1.00
+TIER3_SIZE_MULT        = 0.80
 
 
 # ── Load S&P 500 tickers ────────────────────────────────────────────────────────
-print("Loading S&P 500 tickers from Wikipedia...")
+print("Loading S&P 500 tickers and sector data from Wikipedia...")
 try:
     _req = urllib.request.Request(
         "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
@@ -135,12 +225,15 @@ try:
     )
     with urllib.request.urlopen(_req) as _resp:
         _html = _resp.read()
-    _table     = pd.read_html(io.BytesIO(_html))[0]
-    SW_TICKERS = [t.replace(".", "-") for t in _table["Symbol"].tolist()][:SP500_LIMIT]
-    print(f"  Loaded {len(SW_TICKERS)} S&P 500 tickers")
+    _table = pd.read_html(io.BytesIO(_html))[0]
+    _table["Symbol"] = _table["Symbol"].str.replace(".", "-", regex=False)
+    SW_TICKERS = _table["Symbol"].tolist()[:SP500_LIMIT]
+    E5_TICKER_SECTOR = dict(zip(_table["Symbol"], _table["GICS Sector"]))
+    print(f"  Loaded {len(SW_TICKERS)} S&P 500 tickers across {_table['GICS Sector'].nunique()} sectors")
 except Exception:
     print("Warning: could not fetch S&P 500. Using basic fallback.")
-    SW_TICKERS = ["AAPL", "MSFT", "GOOGL", "AMZN"] # Basic fallback
+    SW_TICKERS = ["AAPL", "MSFT", "GOOGL", "AMZN"]  # Basic fallback
+    E5_TICKER_SECTOR = {}
 
 # ── Combined ticker list ────────────────────────────────────────────────────────
 IX_ETFs = set()
@@ -150,7 +243,7 @@ for g in IX_GROUPS:
 
 LEV_ETFs = set(LEV_UNDERLYING_MAP.keys()) | set(LEV_UNDERLYING_MAP.values())
 
-ALL_TICKERS = sorted(set(SW_TICKERS) | IX_ETFs | LEV_ETFs)
+ALL_TICKERS = sorted(set(SW_TICKERS) | IX_ETFs | LEV_ETFs | set(E5_SECTOR_ETFS) | {"SPY"})
 
 # ── Indicator helpers ──────────────────────────────────────────────────────────
 def _rsi(close, period=14):
@@ -205,6 +298,48 @@ def build_indicator_df(raw_df):
     df["bb_upper"]  = bb_upper
     df["bb_lower"]  = bb_lower
     return df
+
+def build_e6_indicator_df(df):
+    """Adds Engine-6-specific columns (ADX, chop/range streaks, dip metrics) to base indicator df."""
+    d = df.copy()
+
+    # ADX
+    hi, lo, cl = d["High"], d["Low"], d["Close"]
+    tr        = pd.concat([(hi - lo), (hi - cl.shift()).abs(), (lo - cl.shift()).abs()], axis=1).max(axis=1)
+    atr_e6    = tr.ewm(com=E6_ADX_PERIOD - 1, adjust=False).mean()
+    up        = hi.diff().clip(lower=0)
+    dn        = (-lo.diff()).clip(lower=0)
+    plus_dm   = up.where(up > dn, 0)
+    minus_dm  = dn.where(dn > up, 0)
+    plus_di   = 100 * plus_dm.ewm(com=E6_ADX_PERIOD - 1, adjust=False).mean() / atr_e6.replace(0, np.nan)
+    minus_di  = 100 * minus_dm.ewm(com=E6_ADX_PERIOD - 1, adjust=False).mean() / atr_e6.replace(0, np.nan)
+    dx        = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+    d["adx"]  = dx.ewm(com=E6_ADX_PERIOD - 1, adjust=False).mean()
+
+    # ADX consecutive bars below threshold
+    below_adx       = (d["adx"] < E6_ADX_MAX).astype(int)
+    d["adx_consec"] = below_adx.groupby((below_adx != below_adx.shift()).cumsum()).cumcount() + 1
+    d["adx_consec"] = d["adx_consec"] * below_adx
+
+    # 20-day range (low side)
+    low20    = d["Low"].rolling(20).min()
+    in_range = ((d["Close"] < d["high20"]) & (d["Close"] > low20)).astype(int)
+    consec_r = in_range.groupby((in_range != in_range.shift()).cumsum()).cumcount() + 1
+    d["range_consec"] = consec_r * in_range
+
+    # Recent dip below lower BB
+    below_flag           = (d["Close"] < d["bb_lower"]).astype(int)
+    d["recent_below_bb"] = below_flag.shift(1).rolling(E6_DIP_LOOKBACK).max()
+
+    # Max dip depth below lower BB in lookback window
+    dip_pct          = ((d["bb_lower"] - d["Close"]) / d["bb_lower"]).clip(lower=0)
+    d["max_dip_pct"] = dip_pct.shift(1).rolling(E6_DIP_LOOKBACK).max()
+
+    # Lowest close in lookback window
+    d["min_close_lookback"] = d["Close"].shift(1).rolling(E6_DIP_LOOKBACK).min()
+
+    return d
+
 
 # ── Swing signal helpers ───────────────────────────────────────────────────────
 def sw_get_signal(r, p, pp, i):
@@ -261,6 +396,17 @@ for ticker in ALL_TICKERS:
 
 print(f"  {len(ticker_dfs)} tickers with sufficient history\n")
 
+# ── Engine 6: pre-compute chop/dip indicators ──────────────────────────────────
+print("Building Engine 6 indicators (ADX, chop streaks, dip metrics)...")
+e6_ticker_dfs = {}
+for _t in SW_TICKERS:
+    if _t not in ticker_dfs: continue
+    try:
+        e6_ticker_dfs[_t] = build_e6_indicator_df(ticker_dfs[_t])
+    except Exception:
+        continue
+print(f"  {len(e6_ticker_dfs)} tickers with E6 indicators\n")
+
 START_TS = pd.Timestamp(START_DATE)
 
 # ── Compute true relative strength vs SPY for Engine 4 ─────────────────────────
@@ -271,6 +417,35 @@ if "SPY" in ticker_dfs:
         stk_ret63 = ticker_dfs[ticker]["ret63"]
         spy_aligned = spy_ret63.reindex(stk_ret63.index)
         ticker_dfs[ticker]["rs_spy"] = stk_ret63 / spy_aligned.replace(0, float("nan"))
+
+# ── Engine 5: compute daily hot-sector set ───────────────────────────────────
+print("Computing sector RS rankings (Engine 5)...")
+_spy_close = ticker_dfs["SPY"]["Close"] if "SPY" in ticker_dfs else None
+_e5_rs_data = {}
+for _etf in E5_SECTOR_ETFS:
+    if _etf not in ticker_dfs or _spy_close is None: continue
+    _sec_close = ticker_dfs[_etf]["Close"]
+    _spy_aligned = _spy_close.reindex(_sec_close.index)
+    _e5_rs_data[_etf] = _sec_close / _spy_aligned.replace(0, np.nan)
+
+hot_sectors_by_date = {}
+if _e5_rs_data:
+    _rs_df     = pd.DataFrame(_e5_rs_data)
+    _rs_short  = _rs_df.pct_change(E5_RS_WINDOW_SHORT)
+    _rs_long   = _rs_df.pct_change(E5_RS_WINDOW_LONG)
+    _avg_rank  = (_rs_short.rank(axis=1, ascending=False) + _rs_long.rank(axis=1, ascending=False)) / 2.0
+    _rs_slope  = _rs_df.diff(E5_RS_SLOPE_WINDOW)
+    for _date, _row_rank in _avg_rank.iterrows():
+        if _date < START_TS: continue
+        _row_slope = _rs_slope.loc[_date]
+        _hot = set()
+        for _etf in E5_SECTOR_ETFS:
+            if _etf not in _row_rank.index: continue
+            if pd.isna(_row_rank[_etf]) or pd.isna(_row_slope[_etf]): continue
+            if _row_rank[_etf] <= E5_TOP_N_SECTORS and _row_slope[_etf] > 0:
+                _hot.add(_etf)
+        hot_sectors_by_date[_date] = _hot
+    print(f"  Rankings computed for {len(hot_sectors_by_date)} trading days\n")
 
 all_trades = []
 
@@ -812,6 +987,349 @@ if "SPY" in ticker_dfs and "UPRO" in ticker_dfs:
 all_trades.extend(regime_trades)
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# ENGINE 5 — SECTOR HUNTER LOOP
+# ═══════════════════════════════════════════════════════════════════════════════
+print("Running ENGINE 5: SECTOR HUNTER strategy...")
+sector_trades = []
+
+for _e5_ticker in SW_TICKERS:
+    if _e5_ticker not in ticker_dfs: continue
+    _e5_sector = E5_TICKER_SECTOR.get(_e5_ticker)
+    if not _e5_sector or _e5_sector not in E5_SECTOR_ETF_MAP: continue
+    _e5_etf = E5_SECTOR_ETF_MAP[_e5_sector]
+
+    _e5_df      = ticker_dfs[_e5_ticker]
+    _e5_dates   = _e5_df.index.tolist()
+    _e5_records = _e5_df.to_dict("records")
+
+    _e5_pos, _e5_hold, _e5_cool, _e5_consec = None, 0, 0, 0
+
+    for _e5_i, _e5_date in enumerate(_e5_dates):
+        if _e5_date < START_TS: continue
+
+        _e5_row   = _e5_records[_e5_i]
+        _e5_close = float(_e5_row["Close"])
+        _e5_high  = float(_e5_row["High"])
+        _e5_low   = float(_e5_row["Low"])
+
+        if _e5_cool > 0: _e5_cool -= 1
+
+        # ── Exit logic ─────────────────────────────────────────────────────
+        if _e5_pos is not None:
+            _e5_hold += 1
+            if _e5_close > _e5_pos["trail_high"]: _e5_pos["trail_high"] = _e5_close
+            _e5_entry     = _e5_pos["entry_price"]
+            _e5_peak_gain = (_e5_pos["trail_high"] - _e5_entry) / _e5_entry
+            _e5_trail_on  = _e5_peak_gain >= E5_TRAIL_TRIGGER
+            _e5_trail_stp = _e5_pos["trail_high"] * (1 - E5_TRAIL_PCT) if _e5_trail_on else None
+
+            _e5_xp, _e5_xr = None, None
+            if not _e5_trail_on and _e5_low <= _e5_entry * (1 - E5_SL_PCT):
+                _e5_xp, _e5_xr = _e5_entry * (1 - E5_SL_PCT), f"Stop-Loss (-{int(E5_SL_PCT*100)}%)"
+            elif _e5_high >= _e5_entry * (1 + E5_TP_PCT):
+                _e5_xp, _e5_xr = _e5_entry * (1 + E5_TP_PCT), f"Take-Profit (+{int(E5_TP_PCT*100)}%)"
+            elif _e5_trail_on and _e5_hold > 1 and _e5_close <= _e5_trail_stp:
+                _e5_xp, _e5_xr = _e5_close, "Trailing Stop"
+            elif E5_STALE_CUT_DAYS > 0 and _e5_hold >= E5_STALE_CUT_DAYS and _e5_close < _e5_entry * 0.97:
+                _e5_xp, _e5_xr = _e5_close, f"Stale Cut ({E5_STALE_CUT_DAYS}d)"
+            elif _e5_hold >= E5_MAX_HOLD:
+                _e5_xp, _e5_xr = _e5_close, f"Max Hold ({E5_MAX_HOLD}d)"
+
+            if _e5_xp is not None:
+                _e5_pnl_pct = (_e5_xp - _e5_entry) / _e5_entry
+                _e5_size    = _e5_pos["trade_size"]
+                _e5_pnl_dol = _e5_pnl_pct * _e5_size - _e5_size * COMMISSION * 2
+                _e5_stars   = _e5_pos["confidence_stars"]
+                sector_trades.append({
+                    "strategy_type":    "SECTOR",
+                    "ticker":           _e5_ticker,
+                    "entry_date":       _e5_pos["entry_date"].strftime("%Y-%m-%d"),
+                    "entry_price":      round(_e5_entry, 2),
+                    "exit_date":        _e5_date.strftime("%Y-%m-%d"),
+                    "exit_price":       round(_e5_xp, 2),
+                    "exit_reason":      _e5_xr,
+                    "hold_days":        _e5_hold,
+                    "pnl_pct":          round(_e5_pnl_pct, 4),
+                    "pnl_dollar":       round(_e5_pnl_dol, 2),
+                    "strategies":       f"Sector Hunter ({_e5_sector})",
+                    "confidence_stars": _e5_stars,
+                    "trade_size":       _e5_size,
+                    "is_5star":         _e5_stars >= 5,
+                })
+                if "Stop-Loss" in _e5_xr: _e5_cool = E5_COOLDOWN_BARS
+                if _e5_pnl_dol < 0:
+                    _e5_consec += 1
+                    if _e5_consec >= E5_STOCK_LOSS_STREAK:
+                        _e5_cool = max(_e5_cool, E5_STOCK_LOSS_COOLDOWN)
+                        _e5_consec = 0
+                else:
+                    _e5_consec = 0
+                _e5_pos, _e5_hold = None, 0
+                continue
+
+        # ── Ladder buy (add to winner on MA20 pullback) ────────────────────
+        if _e5_pos is not None and not _e5_pos.get("ladder_done"):
+            _ma20 = _e5_row.get("ma20", float("nan"))
+            _rsi  = _e5_row.get("rsi",  float("nan"))
+            if (not pd.isna(_ma20) and not pd.isna(_rsi)
+                    and _e5_close > _e5_pos["entry_price"]
+                    and _e5_close <= float(_ma20) * (1 + E5_LADDER_TRIGGER)
+                    and _e5_close >= float(_ma20)
+                    and _rsi < E5_LADDER_RSI_MAX):
+                _add = _trade_size(_e5_date)
+                _old_sz, _old_ep = _e5_pos["trade_size"], _e5_pos["entry_price"]
+                _e5_pos["entry_price"] = (_old_ep * _old_sz + _e5_close * _add) / (_old_sz + _add)
+                _e5_pos["trade_size"]  = _old_sz + _add
+                _e5_pos["ladder_done"] = True
+
+        # ── Entry logic ────────────────────────────────────────────────────
+        if _e5_pos is not None or _e5_cool > 0: continue
+        if _e5_i < 2: continue
+        if _e5_sector in E5_EXCLUDED_SECTORS: continue
+
+        # Regime gate: SPY above 200-day MA
+        if "SPY" in ticker_dfs and _e5_date in ticker_dfs["SPY"].index:
+            _spy_rec = ticker_dfs["SPY"].loc[_e5_date]
+            _spy_ma200 = _spy_rec.get("ma200", float("nan"))
+            if pd.isna(_spy_ma200) or float(_spy_rec["Close"]) < float(_spy_ma200):
+                continue
+
+        # Layer 1+2: sector must be hot today
+        if _e5_etf not in hot_sectors_by_date.get(_e5_date, set()): continue
+
+        # Valid indicators
+        if any(pd.isna(_e5_row.get(c, float("nan"))) for c in ("rsi", "macd_hist", "ma20", "ma50")): continue
+
+        # Layer 3a: near MA20/MA50 support (5% buffer)
+        if _e5_close < float(_e5_row["ma20"]) * 0.95: continue
+        if _e5_close < float(_e5_row["ma50"]) * 0.95: continue
+
+        # Layer 3b: oversold
+        if _e5_row["rsi"] >= E5_ENTRY_RSI_MAX: continue
+
+        # Layer 3c: two consecutive green closes
+        _e5_prev  = _e5_records[_e5_i - 1]
+        _e5_prev2 = _e5_records[_e5_i - 2]
+        if not (_e5_close > _e5_prev["Close"] and _e5_prev["Close"] > _e5_prev2["Close"]): continue
+
+        _e5_s    = E5_SECTOR_STARS.get(_e5_sector, 4)
+        _e5_mult = 1.3 if _e5_s >= 5 else 1.0
+        _e5_pos  = {
+            "entry_date":       _e5_date,
+            "entry_price":      _e5_close,
+            "trail_high":       _e5_close,
+            "trade_size":       round(_trade_size(_e5_date) * _e5_mult),
+            "confidence_stars": _e5_s,
+            "ladder_done":      False,
+        }
+        _e5_hold = 0
+
+# ── Global loss-streak cooldown (second pass, chronologically accurate) ───────
+if E5_GLOBAL_LOSS_STREAK > 0 and sector_trades:
+    _e5_sorted        = sorted(sector_trades, key=lambda t: t["exit_date"])
+    _e5_g_consec      = 0
+    _e5_g_cooldown    = pd.Timestamp.min
+    _e5_kept          = []
+    for _t in _e5_sorted:
+        _entry_dt = pd.Timestamp(_t["entry_date"])
+        _exit_dt  = pd.Timestamp(_t["exit_date"])
+        if _entry_dt <= _e5_g_cooldown: continue
+        _e5_kept.append(_t)
+        if _t["pnl_dollar"] < 0:
+            _e5_g_consec += 1
+            if _e5_g_consec >= E5_GLOBAL_LOSS_STREAK:
+                _e5_g_cooldown = _exit_dt + pd.offsets.BDay(E5_GLOBAL_COOLDOWN_DAYS)
+                _e5_g_consec = 0
+        else:
+            _e5_g_consec = 0
+    _e5_removed = len(sector_trades) - len(_e5_kept)
+    if _e5_removed:
+        print(f"  Global cooldown filter: removed {_e5_removed} trades entered during loss-streak pauses")
+    sector_trades = _e5_kept
+
+all_trades.extend(sector_trades)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ENGINE 6 — RANGE REVERSION LOOP
+# ═══════════════════════════════════════════════════════════════════════════════
+print("Running ENGINE 6: RANGE REVERSION strategy...")
+chop_trades = []
+
+# Build chronological date list across all E6 tickers
+_e6_date_set = set()
+for _t in e6_ticker_dfs:
+    _e6_date_set.update(e6_ticker_dfs[_t].index)
+e6_all_dates = sorted(d for d in _e6_date_set if d >= START_TS)
+
+e6_open_pos = {}   # {ticker: pos_dict}
+e6_cooldown = {}   # {ticker: bars_remaining}
+
+# Portfolio-level loss freeze state
+e6_consec_losses      = 0
+e6_no_win_since_freeze = False
+e6_freeze_until        = None
+e6_cool_triggers       = 0
+
+_e6_tier_mult = {1: TIER1_SIZE_MULT, 2: TIER2_SIZE_MULT, 3: TIER3_SIZE_MULT}
+
+for _e6_date in e6_all_dates:
+    # Decrement per-ticker cooldowns
+    for _tk in list(e6_cooldown):
+        if e6_cooldown[_tk] > 0:
+            e6_cooldown[_tk] -= 1
+
+    # ── Exit phase ──────────────────────────────────────────────────────────
+    _to_close = []
+    for _tk, _pos in e6_open_pos.items():
+        _idf = e6_ticker_dfs.get(_tk)
+        if _idf is None or _e6_date not in _idf.index:
+            continue
+        _row   = _idf.loc[_e6_date]
+        _close = float(_row["Close"])
+        _high  = float(_row["High"])
+        _low   = float(_row["Low"])
+
+        _pos["hold"] += 1
+        if _close > _pos["peak_price"]:
+            _pos["peak_price"] = _close
+        if not _pos["trail_active"]:
+            if (_pos["peak_price"] - _pos["entry_price"]) / _pos["entry_price"] >= E6_TRAIL_ACTIVATE_PCT:
+                _pos["trail_active"] = True
+
+        _xp, _xr = None, None
+        if _low <= _pos["stop"]:
+            _xp, _xr = _pos["stop"], "Stop-Loss"
+        elif _high >= _pos["target"]:
+            _xp, _xr = _pos["target"], "Take-Profit"
+        elif _pos["trail_active"]:
+            _trail = _pos["peak_price"] * (1 - E6_TRAIL_DISTANCE_PCT)
+            if _close <= _trail:
+                _xp, _xr = _close, "Trailing Stop"
+        if _xp is None and _pos["hold"] >= E6_STALE_CUT_DAYS and _close < _pos["entry_price"] * 0.97:
+            _xp, _xr = _close, f"Stale Cut ({E6_STALE_CUT_DAYS}d)"
+        if _xp is None and _pos["hold"] >= E6_MAX_HOLD:
+            _xp, _xr = _close, f"Max Hold ({E6_MAX_HOLD}d)"
+
+        if _xp is not None:
+            _pnl_pct = (_xp - _pos["entry_price"]) / _pos["entry_price"]
+            _pnl_dol = _pnl_pct * _pos["size"] - 2 * COMMISSION * _pos["size"]
+            chop_trades.append({
+                "strategy_type":    "CHOP",
+                "ticker":           _tk,
+                "entry_date":       _pos["entry_date"].strftime("%Y-%m-%d"),
+                "entry_price":      round(_pos["entry_price"], 2),
+                "exit_date":        _e6_date.strftime("%Y-%m-%d"),
+                "exit_price":       round(_xp, 2),
+                "exit_reason":      _xr,
+                "hold_days":        _pos["hold"],
+                "pnl_pct":          round(_pnl_pct, 4),
+                "pnl_dollar":       round(_pnl_dol, 2),
+                "strategies":       f"Range Reversion E6 (T{_pos['tier']})",
+                "confidence_stars": None,
+                "trade_size":       _pos["size"],
+                "is_5star":         False,
+            })
+            _to_close.append(_tk)
+            if "Stop" in _xr:
+                e6_cooldown[_tk] = E6_COOLDOWN_BARS
+            # Portfolio loss tracking
+            if _pnl_dol < 0:
+                e6_consec_losses += 1
+                limit = E6_CONSEC_LOSS_LIMIT2 if e6_no_win_since_freeze else E6_CONSEC_LOSS_LIMIT
+                days  = E6_LOSS_COOLDOWN_DAYS2 if e6_no_win_since_freeze else E6_LOSS_COOLDOWN_DAYS
+                if e6_consec_losses >= limit:
+                    e6_freeze_until        = _e6_date + pd.Timedelta(days=days)
+                    e6_no_win_since_freeze = True
+                    e6_consec_losses       = 0
+                    e6_cool_triggers      += 1
+            else:
+                e6_consec_losses       = 0
+                e6_no_win_since_freeze = False
+
+    for _tk in _to_close:
+        del e6_open_pos[_tk]
+
+    # ── Entry phase ─────────────────────────────────────────────────────────
+    if e6_freeze_until is not None and _e6_date <= e6_freeze_until:
+        continue
+
+    # SPY 200-day MA gate
+    if "SPY" in ticker_dfs and _e6_date in ticker_dfs["SPY"].index:
+        _spy_r = ticker_dfs["SPY"].loc[_e6_date]
+        _ma200 = _spy_r.get("ma200", float("nan"))
+        if not pd.isna(_ma200) and float(_spy_r["Close"]) < float(_ma200):
+            continue
+
+    for _tk in SW_TICKERS:
+        if _tk in e6_open_pos or e6_cooldown.get(_tk, 0) > 0:
+            continue
+        _idf = e6_ticker_dfs.get(_tk)
+        if _idf is None or _e6_date not in _idf.index:
+            continue
+        _row = _idf.loc[_e6_date]
+        _req = ("bb_lower", "adx", "adx_consec", "range_consec", "rel_vol",
+                "recent_below_bb", "max_dip_pct", "min_close_lookback", "rsi")
+        if any(pd.isna(_row.get(c, float("nan"))) for c in _req):
+            continue
+
+        if _row["adx_consec"] < E6_CHOP_BARS:   continue
+        if _row["range_consec"] < E6_RANGE_BARS: continue
+        if _row["adx"] < E6_ADX_MIN or _row["adx"] > E6_ADX_MAX: continue
+        if _row["rsi"] < E6_RSI_MIN or _row["rsi"] > E6_RSI_MAX: continue
+        if _row["recent_below_bb"] != 1: continue
+
+        _dip   = float(_row["max_dip_pct"])
+        _close = float(_row["Close"])
+        _bb_lo = float(_row["bb_lower"])
+        _min_c = float(_row["min_close_lookback"])
+
+        _path_a = (E6_DIP_MIN_PCT <= _dip < E6_DIP_AVOID_LOW) and (_close >= _bb_lo)
+        _path_b = (_dip >= E6_DIP_AVOID_HIGH) and (_close >= _min_c * (1 + E6_DEEP_REBOUND_PCT))
+        _rec_req = E6_SHALLOW_RECOVER_PCT if _dip < E6_DIP_MIN_PCT else E6_STRONG_RECOVER_PCT
+        _path_c = (_dip > 0) and (_close >= _bb_lo * (1 + _rec_req))
+
+        if not (_path_a or _path_b or _path_c): continue
+        if 0.07 <= _dip < E6_DIP_AVOID_HIGH and _close < _bb_lo * 1.02: continue
+        if _row["rel_vol"] < E6_VOL_SPIKE_MIN: continue
+
+        _adx_v   = float(_row["adx"])
+        _rsi_v   = float(_row["rsi"])
+        _vol_v   = float(_row["rel_vol"])
+        _recov   = (_close / _bb_lo - 1) * 100
+
+        _is_t1 = (
+            (5.0 <= _recov < 8.0)                          or
+            (35 <= _rsi_v < 45)                            or
+            (15 <= _adx_v < 18)                            or
+            _path_a                                        or
+            (10 <= _adx_v < 15)                            or
+            (15 <= _adx_v < 18 and 50 <= _rsi_v < 65)
+        )
+        _is_t2 = (not _is_t1) and (
+            (1.5 <= _vol_v < 2.0)                          or
+            (55 <= _rsi_v < 65)                            or
+            (2.0 <= _vol_v < 3.0)                          or
+            (18 <= _adx_v < 22 and 35 <= _rsi_v < 50)
+        )
+        _tier = 1 if _is_t1 else (2 if _is_t2 else 3)
+        _size = round(_trade_size(_e6_date) * _e6_tier_mult[_tier])
+
+        e6_open_pos[_tk] = {
+            "entry_price":  _close,
+            "stop":         round(_close * (1 - E6_STOP_PCT), 4),
+            "target":       round(_close * (1 + E6_TP_PCT), 4),
+            "entry_date":   _e6_date,
+            "tier":         _tier,
+            "size":         _size,
+            "hold":         0,
+            "peak_price":   _close,
+            "trail_active": False,
+        }
+
+all_trades.extend(chop_trades)
+print(f"  Engine 6 complete: {len(chop_trades)} trades ({e6_cool_triggers} portfolio freezes)\n")
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # COMBINED RESULTS
 # ═══════════════════════════════════════════════════════════════════════════════
 if not all_trades:
@@ -824,6 +1342,8 @@ df_ix  = df_all[df_all["strategy_type"] == "INDEX"]
 df_lv  = df_all[df_all["strategy_type"] == "LEVERAGED"]
 df_mo  = df_all[df_all["strategy_type"] == "MOMENTUM"]
 df_rg  = df_all[df_all["strategy_type"] == "REGIME"]
+df_e5  = df_all[df_all["strategy_type"] == "SECTOR"]
+df_e6  = df_all[df_all["strategy_type"] == "CHOP"]
 
 def _stats(df):
     if len(df) == 0:
@@ -837,7 +1357,7 @@ def _stats(df):
         "avg_hold": df["hold_days"].mean(),
     }
 
-cs, ss, xs, ls, rs = _stats(df_all), _stats(df_sw), _stats(df_ix), _stats(df_lv), _stats(df_rg)
+cs, ss, xs, ls, rs, e5s, e6s = _stats(df_all), _stats(df_sw), _stats(df_ix), _stats(df_lv), _stats(df_rg), _stats(df_e5), _stats(df_e6)
 
 # ── Per-star breakdown (across all trades that have confidence_stars) ──────────
 star_stats = {}
@@ -845,17 +1365,43 @@ for stars in sorted(df_all["confidence_stars"].dropna().unique()):
     df_star = df_all[df_all["confidence_stars"] == stars]
     star_stats[int(stars)] = _stats(df_star)
 
+def _infer_tier(t):
+    """Map any trade to tier 1/2/3 using confidence_stars (E1-E5) or strategies string (E6)."""
+    stars = t.get("confidence_stars")
+    if stars == 6:   return 1
+    if stars == 5:   return 2
+    if stars == 4:   return 3
+    if t.get("strategy_type") == "CHOP":
+        m = re.search(r'\(T(\d)\)', t.get("strategies", ""))
+        return int(m.group(1)) if m else None
+    return None
+
 by_year = {}
 for _, t in df_all.iterrows():
     yr = t["entry_date"][:4]
-    if yr not in by_year: by_year[yr] = {"pnl": 0, "trades": 0, "wins": 0, "sw_pnl": 0, "ix_pnl": 0, "lv_pnl": 0, "rg_pnl": 0}
+    if yr not in by_year:
+        by_year[yr] = {"pnl": 0, "trades": 0, "wins": 0,
+                       "sw_pnl": 0, "ix_pnl": 0, "lv_pnl": 0, "rg_pnl": 0, "e5_pnl": 0, "e6_pnl": 0,
+                       "t1_pnl": 0, "t1_trades": 0, "t1_wins": 0,
+                       "t2_pnl": 0, "t2_trades": 0, "t2_wins": 0}
     by_year[yr]["pnl"] += t["pnl_dollar"]
     by_year[yr]["trades"] += 1
     by_year[yr]["wins"] += 1 if t["pnl_dollar"] > 0 else 0
-    if t["strategy_type"] == "SWING": by_year[yr]["sw_pnl"] += t["pnl_dollar"]
-    elif t["strategy_type"] == "INDEX": by_year[yr]["ix_pnl"] += t["pnl_dollar"]
+    if t["strategy_type"] == "SWING":       by_year[yr]["sw_pnl"] += t["pnl_dollar"]
+    elif t["strategy_type"] == "INDEX":     by_year[yr]["ix_pnl"] += t["pnl_dollar"]
     elif t["strategy_type"] == "LEVERAGED": by_year[yr]["lv_pnl"] += t["pnl_dollar"]
-    elif t["strategy_type"] == "REGIME":   by_year[yr]["rg_pnl"] += t["pnl_dollar"]
+    elif t["strategy_type"] == "REGIME":    by_year[yr]["rg_pnl"] += t["pnl_dollar"]
+    elif t["strategy_type"] == "SECTOR":    by_year[yr]["e5_pnl"] += t["pnl_dollar"]
+    elif t["strategy_type"] == "CHOP":      by_year[yr]["e6_pnl"] += t["pnl_dollar"]
+    _t = _infer_tier(t)
+    if _t == 1:
+        by_year[yr]["t1_pnl"] += t["pnl_dollar"]
+        by_year[yr]["t1_trades"] += 1
+        by_year[yr]["t1_wins"] += 1 if t["pnl_dollar"] > 0 else 0
+    elif _t == 2:
+        by_year[yr]["t2_pnl"] += t["pnl_dollar"]
+        by_year[yr]["t2_trades"] += 1
+        by_year[yr]["t2_wins"] += 1 if t["pnl_dollar"] > 0 else 0
 
 balance = float(STARTING_BALANCE)
 sim_rows = []
@@ -865,8 +1411,9 @@ for yr in sorted(by_year.keys()):
     prev_bal = balance
     balance += yd["pnl"]
     sim_rows.append({
-        "year": yr, "size": size, "trades": yd["trades"], "wins": yd["wins"], "yr_pnl": yd["pnl"], 
+        "year": yr, "size": size, "trades": yd["trades"], "wins": yd["wins"], "yr_pnl": yd["pnl"],
         "sw_pnl": yd["sw_pnl"], "ix_pnl": yd["ix_pnl"], "lv_pnl": yd["lv_pnl"], "rg_pnl": yd["rg_pnl"],
+        "e5_pnl": yd["e5_pnl"], "e6_pnl": yd["e6_pnl"],
         "balance": balance, "yr_return": yd["pnl"] / prev_bal * 100 if prev_bal > 0 else 0,
     })
 
@@ -887,10 +1434,10 @@ OUT_FILE = os.path.join(OUT_DIR, f"master_backtest_{START_DATE}_{END_DATE}_{RUN_
 
 lines = [
     f"{'='*100}",
-    "  MASTER 3-TRACK UNIFIED BACKTEST REPORT",
+    "  MASTER 6-ENGINE UNIFIED BACKTEST REPORT",
     f"  Period: {START_DATE}  →  {END_DATE}",
     f"{'-'*100}",
-    f"  Total Trades    : {cs['trades']}  (SWING: {ss['trades']} | INDEX: {xs['trades']} | LEVERAGED: {ls['trades']} | REGIME: {rs['trades']})",
+    f"  Total Trades    : {cs['trades']}  (SWING: {ss['trades']} | INDEX: {xs['trades']} | LEVERAGED: {ls['trades']} | REGIME: {rs['trades']} | SECTOR: {e5s['trades']} | CHOP E6: {e6s['trades']})",
     f"  Winning Trades  : {cs['wins']}",
     f"  Win Rate        : {cs['win_rate']:.1f}%",
     f"  Total P&L       : ${cs['total_pnl']:+,.2f}",
@@ -907,20 +1454,21 @@ lines = [
     f"  INDEX FADE  {xs['trades']:6d}  {xs['win_rate']:5.1f}%  {xs['pf']:5.2f}    ${xs['total_pnl']:+9,.0f}  ${xs['avg_win']:+9,.0f}  ${xs['avg_loss']:+9,.0f}",
     f"  LEVERAGED   {ls['trades']:6d}  {ls['win_rate']:5.1f}%  {ls['pf']:5.2f}    ${ls['total_pnl']:+9,.0f}  ${ls['avg_win']:+9,.0f}  ${ls['avg_loss']:+9,.0f}",
     f"  REGIME      {rs['trades']:6d}  {rs['win_rate']:5.1f}%  {rs['pf']:5.2f}    ${rs['total_pnl']:+9,.0f}  ${rs['avg_win']:+9,.0f}  ${rs['avg_loss']:+9,.0f}",
+    f"  SECTOR E5   {e5s['trades']:6d}  {e5s['win_rate']:5.1f}%  {e5s['pf']:5.2f}    ${e5s['total_pnl']:+9,.0f}  ${e5s['avg_win']:+9,.0f}  ${e5s['avg_loss']:+9,.0f}",
+    f"  CHOP E6     {e6s['trades']:6d}  {e6s['win_rate']:5.1f}%  {e6s['pf']:5.2f}    ${e6s['total_pnl']:+9,.0f}  ${e6s['avg_win']:+9,.0f}  ${e6s['avg_loss']:+9,.0f}",
     f"  COMBINED    {cs['trades']:6d}  {cs['win_rate']:5.1f}%  {cs['pf']:5.2f}    ${cs['total_pnl']:+9,.0f}  ${cs['avg_win']:+9,.0f}  ${cs['avg_loss']:+9,.0f}",
     f"{'-'*100}",
-    "\nBY STAR RATING",
+    "\nBY TIER",
     f"{'-'*100}",
-    f"  STARS                TRADES   WIN%    PF       P&L        AVG WIN    AVG LOSS   AVG HOLD",
-] 
-star_labels = {4: "4 stars (silver)", 5: "5 star (gold stars)", 6: "5 star max (blue diamond)"}
-for s in sorted(star_stats.keys()):
-    label = star_labels.get(s, "★"*s)
+    f"  TIER                      TRADES   WIN%    PF       P&L        AVG WIN    AVG LOSS   AVG HOLD",
+]
+tier_labels = {6: "Tier 1 · High Conviction", 5: "Tier 2 · Confident", 4: "Tier 3 · Qualified"}
+for s in sorted(star_stats.keys(), reverse=True):
+    label = tier_labels.get(s, f"conf={s}")
     lines.append(
-        f"  {label:<18} {star_stats[s]['trades']:6d}  {star_stats[s]['win_rate']:5.1f}%  {star_stats[s]['pf']:5.2f}   ${star_stats[s]['total_pnl']:+9,.0f}  ${star_stats[s]['avg_win']:+8,.0f}  ${star_stats[s]['avg_loss']:+8,.0f}   {star_stats[s]['avg_hold']:4.1f}d"
+        f"  {label:<26} {star_stats[s]['trades']:6d}  {star_stats[s]['win_rate']:5.1f}%  {star_stats[s]['pf']:5.2f}   ${star_stats[s]['total_pnl']:+9,.0f}  ${star_stats[s]['avg_win']:+8,.0f}  ${star_stats[s]['avg_loss']:+8,.0f}   {star_stats[s]['avg_hold']:4.1f}d"
     )
 
-import re
 trigger_stats = {}
 for t in all_trades:
     strat_clean = re.sub(r'\s*\([^)]*\)', '', t["strategies"]).strip()
@@ -948,7 +1496,7 @@ lines += [
     f"{'-'*100}",
     "\nACCOUNT YEARLY GROWTH (Compounding single shared account)",
     f"{'-'*100}",
-    f"  YEAR   TRADES  WIN%    SWING P&L   INDEX P&L   LEVERAGE P&L   REGIME P&L    TOTAL P&L    BALANCE      RETURN    SPY RETURN",
+    f"  YEAR   TRADES  WIN%    SWING P&L   INDEX P&L   LEVERAGE P&L   REGIME P&L   SECTOR P&L    CHOP P&L    TOTAL P&L    BALANCE      RETURN    SPY RETURN",
 ]
 
 for r in sim_rows:
@@ -965,9 +1513,53 @@ for r in sim_rows:
     wr = r["wins"] / r["trades"] * 100 if r["trades"] > 0 else 0
     lines.append(
         f"  {r['year']:4s}  {r['trades']:6d}  {wr:3.0f}% "
-        f" ${r['sw_pnl']:+9,.0f}  ${r['ix_pnl']:+9,.0f}  ${r['lv_pnl']:+10,.0f}  ${r['rg_pnl']:+10,.0f}  "
+        f" ${r['sw_pnl']:+9,.0f}  ${r['ix_pnl']:+9,.0f}  ${r['lv_pnl']:+10,.0f}  ${r['rg_pnl']:+10,.0f}  ${r['e5_pnl']:+9,.0f}  ${r['e6_pnl']:+9,.0f}  "
         f" ${r['yr_pnl']:+9,.0f}  ${r['balance']:10,.0f}   {r['yr_return']:+6.1f}%   (SPY: {spy_ret:+6.1f}%)"
     )
+
+lines += [
+    f"{'-'*100}",
+    "\nTIER 1 + TIER 2 ONLY — YEAR BY YEAR  (trades you personally take)",
+    f"{'-'*100}",
+    f"  YEAR   T1 TRADES  T1 WIN%   T1 P&L     T2 TRADES  T2 WIN%   T2 P&L    COMBINED P&L   SPY RETURN",
+]
+for r in sim_rows:
+    yd = by_year[r["year"]]
+    spy_ret = 0.0
+    if "SPY" in ticker_dfs:
+        try:
+            spy_sub = ticker_dfs["SPY"].loc[str(r["year"])]
+            if len(spy_sub) > 0:
+                s_o = float(spy_sub.iloc[0]["Close"])
+                s_c = float(spy_sub.iloc[-1]["Close"])
+                spy_ret = (s_c - s_o) / s_o * 100
+        except: pass
+    t1wr = yd["t1_wins"] / yd["t1_trades"] * 100 if yd["t1_trades"] > 0 else 0
+    t2wr = yd["t2_wins"] / yd["t2_trades"] * 100 if yd["t2_trades"] > 0 else 0
+    t12_pnl = yd["t1_pnl"] + yd["t2_pnl"]
+    lines.append(
+        f"  {r['year']:4s}  {yd['t1_trades']:6d}  {t1wr:5.1f}%  ${yd['t1_pnl']:+9,.0f}"
+        f"    {yd['t2_trades']:6d}  {t2wr:5.1f}%  ${yd['t2_pnl']:+9,.0f}"
+        f"    ${t12_pnl:+10,.0f}   (SPY: {spy_ret:+6.1f}%)"
+    )
+t1_total = sum(yd["t1_pnl"] for yd in by_year.values())
+t2_total = sum(yd["t2_pnl"] for yd in by_year.values())
+t1_tr    = sum(yd["t1_trades"] for yd in by_year.values())
+t2_tr    = sum(yd["t2_trades"] for yd in by_year.values())
+t1_wr    = sum(yd["t1_wins"] for yd in by_year.values()) / t1_tr * 100 if t1_tr else 0
+t2_wr    = sum(yd["t2_wins"] for yd in by_year.values()) / t2_tr * 100 if t2_tr else 0
+lines.append(f"  {'─'*98}")
+lines.append(
+    f"  TOTAL  {t1_tr:6d}  {t1_wr:5.1f}%  ${t1_total:+9,.0f}"
+    f"    {t2_tr:6d}  {t2_wr:5.1f}%  ${t2_total:+9,.0f}"
+    f"    ${t1_total+t2_total:+10,.0f}"
+)
+
+# ── CSV export ──────────────────────────────────────────────────────────────────
+csv_path = OUT_FILE.replace(".txt", ".csv")
+df_all["tier"] = df_all.apply(_infer_tier, axis=1)
+df_all.to_csv(csv_path, index=False)
+print(f"Saved CSV: {csv_path}")
 
 report = "\n".join(lines)
 print("\n" + report + "\n")

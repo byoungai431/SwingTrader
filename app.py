@@ -881,7 +881,8 @@ def _enter_position_dialog(ticker, signal_id, default_price, confidence, stop_lo
     st.markdown(f"Set your fill price for **{ticker}**, then confirm.")
     price = st.number_input("Entry price ($)", min_value=0.01, value=float(default_price), step=0.01)
     _settings = get_user_settings(user_id)
-    _default_amt = float(_settings.get("starting_balance") or 10_000) * 0.2  # 20% of balance as suggestion
+    _bal_val = float(_settings.get("starting_balance") or 0)
+    _default_amt = _bal_val * 0.2 if _bal_val > 0 else 2_000.0  # 20% of balance, or $2k default
     amount = st.number_input("Amount to invest ($)", min_value=0.01, value=_default_amt, step=100.0,
                              help="How much $ you're putting into this trade")
     c1, c2 = st.columns(2)
@@ -905,7 +906,8 @@ def _enter_position_manual_dialog(ticker, default_price, user_id):
     st.markdown(f"Track your own position in **{ticker}**.")
     price = st.number_input("Entry price ($)", min_value=0.01, value=float(default_price), step=0.01)
     _settings = get_user_settings(user_id)
-    _default_amt = float(_settings.get("starting_balance") or 10_000) * 0.2
+    _bal_val = float(_settings.get("starting_balance") or 0)
+    _default_amt = _bal_val * 0.2 if _bal_val > 0 else 2_000.0  # 20% of balance, or $2k default
     amount = st.number_input("Amount to invest ($)", min_value=0.01, value=_default_amt, step=100.0,
                              help="How much $ you're putting into this trade")
     col_sl, col_tp = st.columns(2)
@@ -1599,13 +1601,13 @@ def show_positions_view(user_id=""):
         _s = get_user_settings(user_id)
         _bal = st.number_input(
             "Starting balance ($)",
-            min_value=100.0, max_value=10_000_000.0,
+            min_value=0.0, max_value=10_000_000.0,
             value=float(_s.get("starting_balance") or 10_000),
             step=500.0,
             help="Used to suggest default trade sizes when entering positions",
             key="main_starting_balance",
         )
-        st.caption("This is used to pre-fill the suggested trade size when you enter a position (defaults to 20% of your balance).")
+        st.caption("Used to pre-fill the suggested trade size when you enter a position (20% of balance). Signals are always generated regardless of your balance.")
         if st.button("💾  Save Settings", type="primary"):
             save_user_settings(user_id, _bal)
             st.toast("✅ Settings saved")
