@@ -21,7 +21,9 @@ from history import (save_signal, get_history, dismiss_signal,
                       get_user_settings, save_user_settings)
 from config import WATCHLIST, ANTHROPIC_API_KEY
 from notify import send_exit_alert
-from signal_engine import compute_hot_sectors, get_sector_hunter_signal
+from signal_engine import (compute_hot_sectors, get_sector_hunter_signal,
+                           get_index_fade_signal, get_leveraged_signal,
+                           get_regime_signal, get_chop_signal)
 
 st.set_page_config(page_title="Nexus Edge", layout="wide", page_icon="📊")
 
@@ -1868,6 +1870,10 @@ if auto_run or selected_tickers != cached_tickers:
     # Load sector data once for E5 (cached, fast on repeat runs)
     _sp500_sectors = _get_sp500_sector_map_cached()
     _hot_etfs      = _get_hot_sectors_cached()
+    try:
+        _spy_df = fetch_price_data("SPY")
+    except Exception:
+        _spy_df = None
     progress = st.progress(0, text="Initializing analysis...")
     for i, ticker in enumerate(selected_tickers):
         progress.progress((i + 1) / len(selected_tickers), text=f"🔭 Scanning {ticker}...")
@@ -1888,6 +1894,25 @@ if auto_run or selected_tickers != cached_tickers:
                         sig["signal"] = "NO TRADE"
                 if sig["signal"] in ("BUY", "SELL"):
                     save_signal(ticker, sig, ind["latest_close"])
+                # Engine 2: Index Fade
+                sig_e2 = get_index_fade_signal(ticker, ind)
+                if sig_e2.get("signal") == "BUY":
+                    save_signal(sig_e2["ticker"], sig_e2, ind["latest_close"])
+                    extra_sigs.append(sig_e2)
+
+                # Engine 3: Leveraged Shock-Bounce
+                sig_e3 = get_leveraged_signal(ticker, ind)
+                if sig_e3.get("signal") == "BUY":
+                    save_signal(sig_e3["ticker"], sig_e3, ind["latest_close"])
+                    extra_sigs.append(sig_e3)
+
+                # Engine 4: SPY Regime Momentum — only when scanning SPY
+                if ticker == "SPY":
+                    sig_e4 = get_regime_signal(ind)
+                    if sig_e4.get("signal") == "BUY":
+                        save_signal(sig_e4["ticker"], sig_e4, ind["latest_close"])
+                        extra_sigs.append(sig_e4)
+
                 # Engine 5: Sector Hunter
                 _sector = _sp500_sectors.get(ticker)
                 if _sector and _hot_etfs:
@@ -1895,6 +1920,14 @@ if auto_run or selected_tickers != cached_tickers:
                     if sig_e5.get("signal") == "BUY":
                         save_signal(ticker, sig_e5, ind["latest_close"])
                         extra_sigs.append(sig_e5)
+
+                # Engine 6: Range Reversion
+                _e6_skip = {"SPY", "QQQ", "RWM", "PSQ", "SPXU", "SQQQ", "UPRO", "TQQQ", "TSLL", "NVDL", "IWM"}
+                if ticker not in _e6_skip and _spy_df is not None:
+                    sig_e6 = get_chop_signal(ticker, df, _spy_df)
+                    if sig_e6.get("signal") == "BUY":
+                        save_signal(ticker, sig_e6, ind["latest_close"])
+                        extra_sigs.append(sig_e6)
             results.append({"ticker": ticker, "ind": ind, "sig": sig, "df": df, "fund": fund,
                             "extra_sigs": extra_sigs})
         except Exception as _scan_err:
