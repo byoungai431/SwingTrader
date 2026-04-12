@@ -1,15 +1,21 @@
 """
-backtest_master.py — The Ultimate All-Weather 6-Engine Combined Backtest
-=======================================================================
-Runs all engines independently on a shared account:
-1 - CORE SWING:        Oversold pullbacks in Bull Regimes on S&P 500
-2 - INDEX FADE:        Fading RSI > 80 via Inverse ETFs
-3 - LEVERAGED BOUNCE:  Catching pure Capitulation via 3x ETFs
-4 - REGIME MOMENTUM:   SPY trend-following via UPRO
-5 - SECTOR HUNTER:     Oversold dips in hot sectors
-6 - RANGE REVERSION:   BB mean-reversion in sideways/chop markets
+backtest_historical.py — Historical Era Backtest (1985-1995)
+=============================================================
+Same 6-engine logic as backtest_master.py, but run on 1985-1995 data.
 
-Period: 2010-01-01 → 2026-01-01
+ETF PROXIES (ETFs did not exist in this era):
+  SPY  → ^GSPC (S&P 500 index, 1x)
+  UPRO → ^GSPC synthetic 2.5x daily-compounded
+  SPXU → ^GSPC synthetic -2.5x daily-compounded
+  QQQ  → ^NDX  (NASDAQ-100 index, 1x)
+  TQQQ → ^NDX  synthetic 2.5x daily-compounded
+  SQQQ → ^NDX  synthetic -2.5x daily-compounded
+
+NOTE: Sector ETFs (E5), NVDL, TSLL have no proxies → 0 trades for those.
+NOTE: S&P 500 stock universe uses the fja05680 point-in-time list (no survivorship bias).
+NOTE: 2001-2006 is kept as an untouched holdout for a second test.
+
+Period: 1996-01-01 → 2001-12-31
 """
 
 import io
@@ -27,8 +33,8 @@ OUT_DIR  = os.path.join(BASE_DIR, "backtest results")
 os.makedirs(OUT_DIR, exist_ok=True)
 
 # ── Date range ─────────────────────────────────────────────────────────────────
-START_DATE = "2010-01-01"
-END_DATE   = "2026-01-01"
+START_DATE = "1996-01-01"
+END_DATE   = "2008-12-31"
 
 # ── Shared position sizing ──────────────────────────────────────────────────────
 TRADE_SIZE           = 2_000
@@ -110,8 +116,12 @@ LEV_4STAR_MAX_HOLD     = 12
 LEV_5STAR_BREAKOUT_TRAIL_PCT = 0.15
 LEV_5STAR_BREAKOUT_MAX_HOLD  = 30
 
-LEV_MB_RSI_MIN         = 40     
-LEV_MB_RSI_MAX         = 60     
+LEV_MB_RSI_MIN         = 40
+LEV_MB_RSI_MAX         = 60
+
+LEV_LOSS_STREAK_TRIGGER = 3
+LEV_COOLDOWN_BARS_1     = 7
+LEV_COOLDOWN_BARS_2     = 10
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ENGINE 4 — SPY REGIME MOMENTUM (UPRO) config
@@ -215,25 +225,72 @@ TIER1_SIZE_MULT        = 1.50
 TIER2_SIZE_MULT        = 1.00
 TIER3_SIZE_MULT        = 0.80
 
+# ── Pre-Trade Entry Gates ─────────────────────────────────────────────────────
+# E3: gate on underlying (SPY/QQQ) — not the levered ETF
+# E4: gate on SPY directly
+# E5/E6: gate on individual stock
+GATE_COOLDOWN_DAYS = 5     # per-ticker/instrument cooloff bars after gate fires
+GATE_E3_DROP_PCT   = 0.10  # underlying (SPY/QQQ) must not be >10% from 50d high
+GATE_E4_DROP_PCT   = 0.10  # SPY must not be >10% from 50d high
+GATE_E5_DROP_PCT   = 0.10  # stock must not be >10% from 50d high
+# E6 ungated — mean-reversion engine buys pullbacks by design
 
-# ── Load S&P 500 tickers ────────────────────────────────────────────────────────
-print("Loading S&P 500 tickers and sector data from Wikipedia...")
+
+# ── Load historical S&P 500 tickers (point-in-time, no survivorship bias) ──────
+# Source: fja05680/sp500 — monthly constituent snapshots from ~1996 onward
+print(f"Loading historical S&P 500 constituents as of {START_DATE} (fja05680/sp500)...")
+_HIST_URL = (
+    "https://raw.githubusercontent.com/fja05680/sp500/master/"
+    "S%26P%20500%20Historical%20Components%20%26%20Changes(01-17-2026).csv"
+)
+SW_TICKERS    = []
+E5_TICKER_SECTOR = {}
 try:
-    _req = urllib.request.Request(
-        "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
-        headers={"User-Agent": "Mozilla/5.0 (compatible; backtest/1.0)"},
-    )
-    with urllib.request.urlopen(_req) as _resp:
-        _html = _resp.read()
-    _table = pd.read_html(io.BytesIO(_html))[0]
-    _table["Symbol"] = _table["Symbol"].str.replace(".", "-", regex=False)
-    SW_TICKERS = _table["Symbol"].tolist()[:SP500_LIMIT]
-    E5_TICKER_SECTOR = dict(zip(_table["Symbol"], _table["GICS Sector"]))
-    print(f"  Loaded {len(SW_TICKERS)} S&P 500 tickers across {_table['GICS Sector'].nunique()} sectors")
-except Exception:
-    print("Warning: could not fetch S&P 500. Using basic fallback.")
-    SW_TICKERS = ["AAPL", "MSFT", "GOOGL", "AMZN"]  # Basic fallback
-    E5_TICKER_SECTOR = {}
+    _hist_df = pd.read_csv(_HIST_URL, index_col=0)
+    _hist_df.index = pd.to_datetime(_hist_df.index)
+    _hist_df.sort_index(inplace=True)
+    # Find the snapshot closest to (but not after) START_DATE
+    _start_ts   = pd.Timestamp(START_DATE)
+    _valid_idx  = _hist_df.index[_hist_df.index <= _start_ts]
+    if len(_valid_idx) == 0:
+        _valid_idx = _hist_df.index[:1]   # fallback: earliest available
+    _snap_date  = _valid_idx[-1]
+    _tickers_str = _hist_df.loc[_snap_date].iloc[0]
+    _raw_tickers = [t.strip().replace(".", "-") for t in _tickers_str.split(",") if t.strip()]
+    SW_TICKERS   = _raw_tickers[:SP500_LIMIT]
+    print(f"  Loaded {len(SW_TICKERS)} tickers from snapshot dated {_snap_date.date()}")
+
+    # Sector data: still pull from Wikipedia (best free source for GICS sectors)
+    # Sector assignments won't be perfectly historical but close enough for E5
+    try:
+        _req = urllib.request.Request(
+            "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+            headers={"User-Agent": "Mozilla/5.0 (compatible; backtest/1.0)"},
+        )
+        with urllib.request.urlopen(_req) as _resp:
+            _html = _resp.read()
+        _wiki = pd.read_html(io.BytesIO(_html))[0]
+        _wiki["Symbol"] = _wiki["Symbol"].str.replace(".", "-", regex=False)
+        E5_TICKER_SECTOR = dict(zip(_wiki["Symbol"], _wiki["GICS Sector"]))
+        print(f"  Sector data loaded for {len(E5_TICKER_SECTOR)} tickers from Wikipedia")
+    except Exception:
+        print("  Warning: could not load sector data — E5 will produce 0 trades")
+except Exception as _e:
+    print(f"Warning: could not load historical constituents ({_e}). Falling back to Wikipedia current list.")
+    try:
+        _req = urllib.request.Request(
+            "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+            headers={"User-Agent": "Mozilla/5.0 (compatible; backtest/1.0)"},
+        )
+        with urllib.request.urlopen(_req) as _resp:
+            _html = _resp.read()
+        _table = pd.read_html(io.BytesIO(_html))[0]
+        _table["Symbol"] = _table["Symbol"].str.replace(".", "-", regex=False)
+        SW_TICKERS = _table["Symbol"].tolist()[:SP500_LIMIT]
+        E5_TICKER_SECTOR = dict(zip(_table["Symbol"], _table["GICS Sector"]))
+    except Exception:
+        SW_TICKERS = ["AAPL", "MSFT", "GE", "XOM"]
+        E5_TICKER_SECTOR = {}
 
 # ── Combined ticker list ────────────────────────────────────────────────────────
 IX_ETFs = set()
@@ -289,6 +346,7 @@ def build_indicator_df(raw_df):
     df["ma50"]      = df["Close"].rolling(50).mean()
     df["ma200"]     = df["Close"].rolling(200).mean()
     df["high20"]    = df["High"].rolling(20).max()
+    df["high50"]    = df["High"].rolling(50).max()
     df["ret63"]     = df["Close"].pct_change(63)
     df["atr14"]     = _atr(df["High"], df["Low"], df["Close"])
     df["vol_avg20"] = df["Volume"].rolling(20).mean()
@@ -396,6 +454,78 @@ for ticker in ALL_TICKERS:
 
 print(f"  {len(ticker_dfs)} tickers with sufficient history\n")
 
+# ── Historical proxy injection ─────────────────────────────────────────────────
+# ETFs didn't exist in 1985-1995; inject ^GSPC and ^NDX as proxies.
+print("Downloading historical proxies (^GSPC, ^NDX)...")
+_proxy_raw = yf.download(["^GSPC", "^NDX"], start=warmup, end=END_DATE,
+                         progress=False, auto_adjust=True)
+
+def _extract_index_df(raw, sym):
+    try:
+        if raw.columns.nlevels > 1:
+            df = raw.xs(sym, axis=1, level=1).copy()
+        else:
+            df = raw.copy()
+        df = df.dropna(subset=["Close"])
+        # Indices often have zero/NaN volume — fill so indicators don't break
+        if "Volume" not in df.columns or df["Volume"].isna().all():
+            df["Volume"] = 1_000_000
+        df["Volume"] = df["Volume"].fillna(1_000_000).replace(0, 1_000_000)
+        return df
+    except Exception:
+        return None
+
+def _build_proxy_ohlcv(src_df, leverage=1.0):
+    """Construct OHLCV for a (possibly leveraged) proxy from an index df."""
+    base_close = src_df["Close"]
+    if leverage == 1.0:
+        df = src_df[["Open", "High", "Low", "Close", "Volume"]].copy()
+        return df
+    # Synthetic: compound daily returns by leverage factor
+    daily_ret  = base_close.pct_change().fillna(0)
+    lev_ret    = daily_ret * leverage
+    price      = 100.0 * (1 + lev_ret).cumprod()
+    # Scale High/Low from underlying range ratio
+    range_ratio = ((src_df["High"] - src_df["Low"]) /
+                   src_df["Close"].replace(0, np.nan)).fillna(0)
+    half_range  = range_ratio * abs(leverage) / 2
+    hi = price * (1 + half_range)
+    lo = price * (1 - half_range)
+    op = price.shift(1).fillna(price)
+    if leverage < 0:
+        hi, lo = lo, hi   # flip for inverse
+    df = pd.DataFrame({"Open": op, "High": hi, "Low": lo,
+                       "Close": price, "Volume": 1_000_000},
+                      index=price.index)
+    return df.dropna(subset=["Close"])
+
+_gspc_raw = _extract_index_df(_proxy_raw, "^GSPC")
+_ndx_raw  = _extract_index_df(_proxy_raw, "^NDX")
+
+_PROXY_SPECS = {}
+if _gspc_raw is not None:
+    _PROXY_SPECS["SPY"]  = (_gspc_raw,  1.0)
+    _PROXY_SPECS["UPRO"] = (_gspc_raw,  2.5)
+    _PROXY_SPECS["SPXU"] = (_gspc_raw, -2.5)
+if _ndx_raw is not None:
+    _PROXY_SPECS["QQQ"]  = (_ndx_raw,   1.0)
+    _PROXY_SPECS["TQQQ"] = (_ndx_raw,   2.5)
+    _PROXY_SPECS["SQQQ"] = (_ndx_raw,  -2.5)
+
+for _pticker, (_psrc, _plev) in _PROXY_SPECS.items():
+    if _pticker not in ticker_dfs:
+        try:
+            _pdf = _build_proxy_ohlcv(_psrc, _plev)
+            if len(_pdf) >= 210:
+                ticker_dfs[_pticker] = build_indicator_df(_pdf)
+                _lbl = f"{_plev:+.0f}x ^{'GSPC' if _psrc is _gspc_raw else 'NDX'}"
+                print(f"  Proxy injected: {_pticker} ({_lbl})")
+        except Exception as _pe:
+            print(f"  Proxy failed for {_pticker}: {_pe}")
+
+print(f"  After proxy injection: {len(ticker_dfs)} tickers total\n")
+# ── End historical proxy injection ────────────────────────────────────────────
+
 # ── Engine 6: pre-compute chop/dip indicators ──────────────────────────────────
 print("Building Engine 6 indicators (ADX, chop streaks, dip metrics)...")
 e6_ticker_dfs = {}
@@ -406,8 +536,6 @@ for _t in SW_TICKERS:
     except Exception:
         continue
 print(f"  {len(e6_ticker_dfs)} tickers with E6 indicators\n")
-
-# Build SPY E6 indicators separately for ADX regime gate
 
 START_TS = pd.Timestamp(START_DATE)
 
@@ -678,6 +806,9 @@ for exec_ticker, base_ticker in LEV_UNDERLYING_MAP.items():
     b_date_to_i = {d: i for i, d in enumerate(b_dates)}
 
     position, hold_days, cooldown = None, 0, 0
+    consec_losses      = 0
+    cooldown_escalated = False
+    gate_cooldown      = 0   # E3 entry gate: underlying dropped ≥ GATE_E3_DROP_PCT
     for e_i in range(len(e_recs)):
         date = e_dates[e_i]
         if date < START_TS: continue
@@ -688,6 +819,7 @@ for exec_ticker, base_ticker in LEV_UNDERLYING_MAP.items():
         close, high, low, atr = float(e_row["Close"]), float(e_row["High"]), float(e_row["Low"]), float(e_row["atr14"])
 
         if cooldown > 0: cooldown -= 1
+        if gate_cooldown > 0: gate_cooldown -= 1
 
         if position is not None:
             hold_days += 1
@@ -744,11 +876,25 @@ for exec_ticker, base_ticker in LEV_UNDERLYING_MAP.items():
                     "trade_size":       pos_size,
                     "is_5star":         position["is_5star"],
                 })
-                if exit_reason.startswith("Stop"): cooldown = SW_COOLDOWN_BARS
+                if exit_reason.startswith("Stop"):
+                    consec_losses += 1
+                    if consec_losses >= LEV_LOSS_STREAK_TRIGGER:
+                        cooldown = LEV_COOLDOWN_BARS_2 if cooldown_escalated else LEV_COOLDOWN_BARS_1
+                        cooldown_escalated = True
+                        consec_losses = 0
+                else:
+                    consec_losses      = 0
+                    cooldown_escalated = False
                 position, hold_days = None, 0
                 continue
 
         if position is None and not pd.isna(atr) and atr > 0 and cooldown == 0:
+            # ── E3 entry gate: block if underlying (SPY/QQQ) dropped ≥10% from 50d high ─
+            _b_h20 = b_row.get("high50", float("nan"))
+            if not pd.isna(_b_h20) and float(_b_h20) > 0 and float(b_row["Close"]) < float(_b_h20) * (1 - GATE_E3_DROP_PCT):
+                gate_cooldown = GATE_COOLDOWN_DAYS
+            if gate_cooldown > 0:
+                continue
             ibs_block = (b_i == 0 or pd.isna(b_recs[b_i - 1]["ibs"]) or b_recs[b_i - 1]["ibs"] >= SW_IBS_MAX_ENTRY_5STAR)
             if not pd.isna(b_row["rsi"]) and b_row["rsi"] < SW_RSI_5STAR_ENTRY and not ibs_block:
                 bb_lower_val = b_row.get("bb_lower", float("nan"))
@@ -817,15 +963,17 @@ if "SPY" in ticker_dfs and "UPRO" in ticker_dfs:
     # Strategy A positions
     open_pos = {} # ticker -> pos_dict
     cooldown_until = None
-    
+
     # Strategy B position
     bull_hold_pos = None
     bull_hold_cooldown_until = None
     ma50_breach_count = 0
-    
+    e4_gate_cooldown = 0   # E4 entry gate: SPY dropped ≥ GATE_E4_DROP_PCT from 20d high
+
     for date in m_cal:
         s_row = spy_fast.get(date)
         if s_row is None: continue
+        if e4_gate_cooldown > 0: e4_gate_cooldown -= 1
         
         # Check MA50 breach (5-day rule)
         if s_row['Close'] < s_row['ma50']:
@@ -959,8 +1107,13 @@ if "SPY" in ticker_dfs and "UPRO" in ticker_dfs:
                     bull_hold_pos = None
                     bull_hold_cooldown_until = date + pd.Timedelta(days=1)
 
+        # ── E4 entry gate: block if SPY dropped ≥10% from 50d high ─────────────
+        _e4_h20 = s_row.get("high50", float("nan"))
+        if not pd.isna(_e4_h20) and float(_e4_h20) > 0 and float(s_row["Close"]) < float(_e4_h20) * (1 - GATE_E4_DROP_PCT):
+            e4_gate_cooldown = GATE_COOLDOWN_DAYS
+
         # Entries
-        if confirmed_bull and date in upro_fast:
+        if confirmed_bull and date in upro_fast and e4_gate_cooldown == 0:
             # Strategy A: Pullback
             if not open_pos and (cooldown_until is None or date > cooldown_until):
                 spy_idx = spy_df.index.get_loc(date)
@@ -1005,6 +1158,7 @@ for _e5_ticker in SW_TICKERS:
     _e5_records = _e5_df.to_dict("records")
 
     _e5_pos, _e5_hold, _e5_cool, _e5_consec = None, 0, 0, 0
+    _e5_gate_cool = 0  # E5 entry gate: stock dropped ≥ GATE_E5_DROP_PCT from 20d high
 
     for _e5_i, _e5_date in enumerate(_e5_dates):
         if _e5_date < START_TS: continue
@@ -1015,6 +1169,7 @@ for _e5_ticker in SW_TICKERS:
         _e5_low   = float(_e5_row["Low"])
 
         if _e5_cool > 0: _e5_cool -= 1
+        if _e5_gate_cool > 0: _e5_gate_cool -= 1
 
         # ── Exit logic ─────────────────────────────────────────────────────
         if _e5_pos is not None:
@@ -1088,6 +1243,12 @@ for _e5_ticker in SW_TICKERS:
         if _e5_pos is not None or _e5_cool > 0: continue
         if _e5_i < 2: continue
         if _e5_sector in E5_EXCLUDED_SECTORS: continue
+
+        # ── E5 entry gate: block if stock dropped ≥10% from 50d high ──────
+        _e5_h20 = _e5_row.get("high50", float("nan"))
+        if not pd.isna(_e5_h20) and float(_e5_h20) > 0 and _e5_close < float(_e5_h20) * (1 - GATE_E5_DROP_PCT):
+            _e5_gate_cool = GATE_COOLDOWN_DAYS
+        if _e5_gate_cool > 0: continue
 
         # Regime gate: SPY above 200-day MA
         if "SPY" in ticker_dfs and _e5_date in ticker_dfs["SPY"].index:
@@ -1163,17 +1324,13 @@ for _t in e6_ticker_dfs:
     _e6_date_set.update(e6_ticker_dfs[_t].index)
 e6_all_dates = sorted(d for d in _e6_date_set if d >= START_TS)
 
-e6_open_pos = {}   # {ticker: pos_dict}
-e6_cooldown = {}   # {ticker: bars_remaining}
-
+e6_open_pos = {}        # {ticker: pos_dict}
+e6_cooldown = {}        # {ticker: bars_remaining}
 # Portfolio-level loss freeze state
 e6_consec_losses      = 0
 e6_no_win_since_freeze = False
 e6_freeze_until        = None
 e6_cool_triggers       = 0
-e6_spy_below_50_streak = 0   # consecutive days SPY closed below 50 SMA
-e6_spy_above_50_streak = 0   # consecutive days SPY closed above 50 SMA (for deactivation)
-e6_spy_gated           = False  # True once streak >= 2
 
 _e6_tier_mult = {1: TIER1_SIZE_MULT, 2: TIER2_SIZE_MULT, 3: TIER3_SIZE_MULT}
 
@@ -1182,7 +1339,6 @@ for _e6_date in e6_all_dates:
     for _tk in list(e6_cooldown):
         if e6_cooldown[_tk] > 0:
             e6_cooldown[_tk] -= 1
-
     # ── Exit phase ──────────────────────────────────────────────────────────
     _to_close = []
     for _tk, _pos in e6_open_pos.items():
@@ -1258,23 +1414,12 @@ for _e6_date in e6_all_dates:
     if e6_freeze_until is not None and _e6_date <= e6_freeze_until:
         continue
 
-    # SPY 50 SMA gate — activates after 2 consecutive closes below 50 SMA, lifts after 2 consecutive closes above
+    # SPY 200-day MA gate
     if "SPY" in ticker_dfs and _e6_date in ticker_dfs["SPY"].index:
-        _spy_r  = ticker_dfs["SPY"].loc[_e6_date]
-        _ma50   = _spy_r.get("ma50", float("nan"))
-        if not pd.isna(_ma50):
-            if float(_spy_r["Close"]) < float(_ma50):
-                e6_spy_below_50_streak += 1
-                e6_spy_above_50_streak  = 0
-                if e6_spy_below_50_streak >= 2:
-                    e6_spy_gated = True
-            else:
-                e6_spy_above_50_streak += 1
-                e6_spy_below_50_streak  = 0
-                if e6_spy_above_50_streak >= 2:
-                    e6_spy_gated = False
-    if e6_spy_gated:
-        continue
+        _spy_r = ticker_dfs["SPY"].loc[_e6_date]
+        _ma200 = _spy_r.get("ma200", float("nan"))
+        if not pd.isna(_ma200) and float(_spy_r["Close"]) < float(_ma200):
+            continue
 
     for _tk in SW_TICKERS:
         if _tk in e6_open_pos or e6_cooldown.get(_tk, 0) > 0:
@@ -1344,6 +1489,67 @@ for _e6_date in e6_all_dates:
 
 all_trades.extend(chop_trades)
 print(f"  Engine 6 complete: {len(chop_trades)} trades ({e6_cool_triggers} portfolio freezes)\n")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# T1+T2 MODEL COOLDOWN FILTER
+# Cross-engine consecutive-loss protection for trades surfaced to the user.
+# Rule:  ≥4 consec T1/T2 losses  → 7-day entry block
+#        ≥2 consec T1/T2 losses (after any prior cooldown) → 15-day entry block
+#        Any T1/T2 win resets the streak counter.
+# ═══════════════════════════════════════════════════════════════════════════════
+def _is_t12_trade(t):
+    stars = t.get("confidence_stars")
+    if stars in (5, 6):
+        return True
+    if t.get("strategy_type") == "CHOP":
+        return bool(re.search(r'\(T[12]\)', t.get("strategies", "")))
+    return False
+
+def apply_t12_cooldown(trades):
+    """Return set of indices to remove (T1+T2 trades entered during a cooldown window)."""
+    # Build events: (date, type, orig_idx)  type 0=entry, 1=exit
+    events = []
+    for i, t in enumerate(trades):
+        if not _is_t12_trade(t):
+            continue
+        events.append((pd.Timestamp(t["entry_date"]), 0, i, t))
+        events.append((pd.Timestamp(t["exit_date"]),  1, i, t))
+    events.sort(key=lambda x: (x[0], x[1]))  # entry before exit on same day
+
+    consec_losses  = 0
+    had_cooldown   = False
+    cooldown_until = None
+    removed        = set()
+    accepted       = set()
+
+    for evt_date, evt_type, idx, trade in events:
+        if evt_type == 0:  # entry
+            if cooldown_until is not None and evt_date <= cooldown_until:
+                removed.add(idx)
+            else:
+                accepted.add(idx)
+        else:  # exit
+            if idx in removed:
+                continue  # trade was never taken — don't count outcome
+            if trade["pnl_dollar"] > 0:
+                consec_losses = 0
+            else:
+                consec_losses += 1
+                threshold = 2 if had_cooldown else 4
+                cd_days   = 15 if had_cooldown else 7
+                if consec_losses >= threshold:
+                    cooldown_until = evt_date + pd.Timedelta(days=cd_days)
+                    had_cooldown   = True
+                    consec_losses  = 0
+
+    return removed
+
+_t12_removed = apply_t12_cooldown(all_trades)
+if _t12_removed:
+    print(f"  T1+T2 model cooldown filter: blocked {len(_t12_removed)} trades entered during loss-streak pauses\n")
+    all_trades = [t for i, t in enumerate(all_trades) if i not in _t12_removed]
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # COMBINED RESULTS
