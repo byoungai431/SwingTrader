@@ -70,6 +70,7 @@ def init_db():
             # Per-user columns / tables (safe to run on every startup)
             cur.execute("ALTER TABLE positions ADD COLUMN IF NOT EXISTS user_id TEXT")
             cur.execute("ALTER TABLE positions ADD COLUMN IF NOT EXISTS position_amount REAL")
+            cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS peak_price REAL")
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS user_settings (
                     user_id          TEXT PRIMARY KEY,

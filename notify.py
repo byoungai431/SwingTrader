@@ -517,6 +517,8 @@ def send_exit_alert(hits: list[dict]) -> bool:
             icon, label = "📈", "IBS exit — mean-reversion exhausted"
         elif h["hit_type"] == "RSI_EXIT":
             icon, label = "📊", "RSI momentum exit"
+        elif h["hit_type"] == "TRAIL_STOP":
+            icon, label = "📉", "Trailing stop hit"
         elif h["hit_type"] == "MANUAL":
             icon, label = "🤚", "Manually closed (model still tracking)"
         else:

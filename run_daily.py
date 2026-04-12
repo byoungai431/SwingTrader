@@ -206,7 +206,7 @@ def _get_open_positions() -> list[dict]:
         conn = get_conn()
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("""
-                SELECT id, ticker, date, confidence, price, stop_loss, target
+                SELECT id, ticker, date, confidence, price, stop_loss, target, rationale, peak_price
                 FROM signals
                 WHERE signal = 'BUY' AND exit_price IS NULL
                 ORDER BY date DESC
@@ -227,12 +227,16 @@ def _get_open_positions() -> list[dict]:
     try:
         raw = yf.download(tickers, period="3mo", progress=False, auto_adjust=True)
         current_ibs = {}
+        current_highs = {}
+        current_lows  = {}
         if len(tickers) == 1:
             try:
                 close = raw["Close"].dropna()
                 high  = raw["High"].dropna()
                 low   = raw["Low"].dropna()
                 current_prices[tickers[0]] = float(close.iloc[-1])
+                current_highs[tickers[0]]  = float(high.iloc[-1])
+                current_lows[tickers[0]]   = float(low.iloc[-1])
                 delta = close.diff()
                 gain = delta.clip(lower=0).ewm(com=13, min_periods=14).mean()
                 loss = (-delta.clip(upper=0)).ewm(com=13, min_periods=14).mean()
@@ -249,6 +253,8 @@ def _get_open_positions() -> list[dict]:
                     high  = raw["High"][t].dropna()
                     low   = raw["Low"][t].dropna()
                     current_prices[t] = float(close.iloc[-1])
+                    current_highs[t]  = float(high.iloc[-1])
+                    current_lows[t]   = float(low.iloc[-1])
                     delta = close.diff()
                     gain = delta.clip(lower=0).ewm(com=13, min_periods=14).mean()
                     loss = (-delta.clip(upper=0)).ewm(com=13, min_periods=14).mean()
@@ -264,8 +270,10 @@ def _get_open_positions() -> list[dict]:
     for p in positions:
         cur = current_prices.get(p["ticker"])
         p["current_price"] = cur
-        p["current_rsi"] = current_rsi.get(p["ticker"])
-        p["current_ibs"] = current_ibs.get(p["ticker"])
+        p["current_high"]  = current_highs.get(p["ticker"])
+        p["current_low"]   = current_lows.get(p["ticker"])
+        p["current_rsi"]   = current_rsi.get(p["ticker"])
+        p["current_ibs"]   = current_ibs.get(p["ticker"])
         entry = p.get("price") or 0
         if cur and entry:
             p["unrealized_pnl"] = (cur - entry) / entry * 100
@@ -275,71 +283,159 @@ def _get_open_positions() -> list[dict]:
     return positions
 
 
+def _update_peak_price(signal_id: int, new_peak: float):
+    """Persist new peak_price if it exceeds the stored value (or was NULL)."""
+    try:
+        conn = get_conn()
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE signals SET peak_price = %s
+                WHERE id = %s AND (peak_price IS NULL OR peak_price < %s)
+            """, (new_peak, signal_id, new_peak))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def _detect_engine(rationale: str) -> str:
+    """Identify which engine generated a signal from its rationale text."""
+    r = (rationale or "").lower()
+    if "range reversion e6" in r:
+        return "E6"
+    if "sector hunter" in r:
+        return "E5"
+    if "regime" in r:
+        return "E4"
+    if "leveraged" in r or "shock-bounce" in r or "momentum breakout" in r:
+        return "E3"
+    if "index fade" in r or "blue diamond" in r:
+        return "E2"
+    return "E1"
+
+
+# Per-engine exit parameters (mirrors backtest_master.py constants)
+# trail_trigger: peak gain % at which trailing stop activates (None = no trail)
+# trail_distance: trail gap below peak (e.g. 0.04 = 4% below peak)
+# max_hold / max_hold_5star: trading-day hold limit
+# stale_cut: trading days before stale cut (None = disabled)
+# stale_unconditional: if True, cut regardless of P&L (E6 behavior); else only if loss
+_ENGINE_PARAMS = {
+    "E1": {"trail_trigger": 0.07, "trail_distance": 0.08, "max_hold": 30, "max_hold_5star": 35, "stale_cut": 12,  "stale_unconditional": False},
+    "E2": {"trail_trigger": None, "trail_distance": None, "max_hold": 30, "max_hold_5star": 30, "stale_cut": 20,  "stale_unconditional": False},
+    "E3": {"trail_trigger": None, "trail_distance": None, "max_hold": 35, "max_hold_5star": 30, "stale_cut": None, "stale_unconditional": False},
+    "E4": {"trail_trigger": 0.17, "trail_distance": 0.10, "max_hold": 90, "max_hold_5star": 90, "stale_cut": None, "stale_unconditional": False},
+    "E5": {"trail_trigger": 0.08, "trail_distance": 0.04, "max_hold": 30, "max_hold_5star": 30, "stale_cut": 15,  "stale_unconditional": False},
+    "E6": {"trail_trigger": 0.08, "trail_distance": 0.04, "max_hold": 25, "max_hold_5star": 25, "stale_cut": 12,  "stale_unconditional": True},
+}
+
+
 def _check_stop_target_hits(open_positions: list[dict]) -> list[dict]:
-    """Auto-close any position that hit its stop loss, target, floor, max hold, or stale cut."""
+    """Auto-close any open position that hit its stop, target, trail, floor, max hold, or stale cut."""
     hits = []
     today = datetime.now().strftime("%Y-%m-%d")
     for p in open_positions:
         cur = p.get("current_price")
         if not cur:
             continue
-        cur = float(cur)
-        entry = p.get("price") or 0
-        stop   = _parse_price(p.get("stop_loss"))
-        target = _parse_price(p.get("target"))
-        conf   = p.get("confidence") or 0
+        cur        = float(cur)
+        today_low  = float(p.get("current_low")  or cur)
+        today_high = float(p.get("current_high") or cur)
+        entry      = float(p.get("price") or 0)
+        stop       = _parse_price(p.get("stop_loss"))
+        target     = _parse_price(p.get("target"))
+        conf       = p.get("confidence") or 0
+        engine     = _detect_engine(p.get("rationale") or "")
+        cfg        = _ENGINE_PARAMS.get(engine, _ENGINE_PARAMS["E1"])
 
-        hit_type = None
-        if stop and cur <= stop:
+        # ── Update peak_price daily (use today's high; seed with entry if never set) ──
+        stored_peak = p.get("peak_price")
+        new_peak    = max(today_high, stored_peak or 0, entry or 0)
+        if stored_peak is None or today_high > (stored_peak or 0):
+            _update_peak_price(p["id"], new_peak)
+        peak = new_peak
+
+        # ── Exit checks (priority order matches backtest) ──────────────────────
+        hit_type    = None
+        trail_level = None
+
+        # 1. Hard stop-loss (intraday low)
+        if stop and today_low <= stop:
             hit_type = "STOP"
-        elif target and cur >= target:
+
+        # 2. Take-profit (intraday high)
+        elif target and today_high >= target:
             hit_type = "TARGET"
 
-        # 5★/5★ MAX floor stop: exit if down FLOOR_5STAR% from entry
+        # 3. Floor stop for 5★ entries (intraday low)
         if hit_type is None and conf >= 5 and FLOOR_5STAR > 0 and entry:
-            if cur <= entry * (1 - FLOOR_5STAR):
+            if today_low <= entry * (1 - FLOOR_5STAR):
                 hit_type = "FLOOR_5STAR"
 
-        # 5★/5★ MAX RSI momentum exit: exit when RSI > 72 (mirrors backtest RSI_5STAR_EXIT)
+        # 4. Trailing stop (intraday low vs trail level)
+        if hit_type is None and cfg["trail_trigger"] and cfg["trail_distance"] and entry and peak:
+            peak_gain = (peak - entry) / entry
+            if peak_gain >= cfg["trail_trigger"]:
+                trail_level = peak * (1 - cfg["trail_distance"])
+                if today_low <= trail_level:
+                    hit_type = "TRAIL_STOP"
+
+        # 5. RSI momentum exit (5★ SWING / E1 only)
         rsi_now = p.get("current_rsi")
-        if hit_type is None and conf >= 5 and rsi_now is not None and rsi_now > 72:
+        if hit_type is None and conf >= 5 and engine == "E1" and rsi_now is not None and rsi_now > 72:
             hit_type = "RSI_EXIT"
 
-        # 5★/5★ MAX IBS exit: close near day's high = mean-reversion exhausted (only if profitable)
+        # 6. IBS exit (5★ SWING / E1 only, profitable only)
         ibs_now = p.get("current_ibs")
-        if hit_type is None and conf >= 5 and ibs_now is not None and ibs_now > IBS_MIN_EXIT and cur > entry:
+        if hit_type is None and conf >= 5 and engine == "E1" and ibs_now is not None and ibs_now > IBS_MIN_EXIT and cur > entry:
             hit_type = "IBS_EXIT"
 
-        # Max hold: exit after N trading days (30 for 4★, 35 for 5★)
+        # 7. Max hold
         if hit_type is None and entry and p.get("date"):
             try:
                 days_held = len(pd.bdate_range(str(p["date"])[:10], today))
-                max_hold = MAX_HOLD_5STAR if conf >= 5 else MAX_HOLD_DAYS
+                max_hold  = cfg["max_hold_5star"] if conf >= 5 else cfg["max_hold"]
                 if days_held >= max_hold:
                     hit_type = "MAX_HOLD"
             except Exception:
                 pass
 
-        # Stale cut: exit after STALE_CUT_DAYS if gain < 0% (5★ exempt)
-        if hit_type is None and conf < 5 and entry and p.get("date") and STALE_CUT_DAYS > 0:
+        # 8. Stale cut (engine-specific: E6 is unconditional; others require a loss)
+        if hit_type is None and cfg["stale_cut"] and entry and p.get("date"):
             try:
                 days_held = len(pd.bdate_range(str(p["date"])[:10], today))
-                if days_held >= STALE_CUT_DAYS and cur < entry:
-                    hit_type = "STALE_CUT"
+                if days_held >= cfg["stale_cut"]:
+                    if cfg["stale_unconditional"] or cur < entry:
+                        hit_type = "STALE_CUT"
             except Exception:
                 pass
 
         if hit_type:
-            pnl = (cur - entry) / entry * 100 if entry else 0
+            # Use exact stop/target/trail level as exit price where available
+            if hit_type == "STOP" and stop:
+                exit_price = stop
+            elif hit_type == "TARGET" and target:
+                exit_price = target
+            elif hit_type == "TRAIL_STOP" and trail_level:
+                exit_price = trail_level
+            elif hit_type == "FLOOR_5STAR" and entry:
+                exit_price = round(entry * (1 - FLOOR_5STAR), 4)
+            else:
+                exit_price = cur
+
+            pnl      = (exit_price - entry) / entry * 100 if entry else 0
             pnl_sign = "+" if pnl >= 0 else ""
+
+            trail_pct = int(cfg["trail_distance"] * 100) if cfg["trail_distance"] else 0
             label_map = {
                 "TARGET":      "Target hit",
                 "STOP":        "Stop loss hit",
                 "FLOOR_5STAR": f"Floor stop hit (-{int(FLOOR_5STAR * 100)}%)",
+                "TRAIL_STOP":  f"Trailing stop hit (-{trail_pct}% from peak ${peak:.2f})" if peak else "Trailing stop hit",
                 "RSI_EXIT":    f"RSI momentum exit (RSI {rsi_now:.1f} > 72)" if rsi_now is not None else "RSI momentum exit",
                 "IBS_EXIT":    f"IBS exit (IBS {ibs_now:.2f} > {IBS_MIN_EXIT}) — mean-reversion exhausted" if ibs_now is not None else "IBS exit",
-                "MAX_HOLD":    "Max hold reached",
-                "STALE_CUT":   f"Stale cut (no gain after {STALE_CUT_DAYS}d)",
+                "MAX_HOLD":    f"Max hold reached ({cfg['max_hold_5star'] if conf >= 5 else cfg['max_hold']}d)",
+                "STALE_CUT":   f"Stale cut ({cfg['stale_cut']}d{'  unconditional' if cfg['stale_unconditional'] else ', no gain'})",
             }
             label = label_map.get(hit_type, hit_type)
             try:
@@ -348,21 +444,20 @@ def _check_stop_target_hits(open_positions: list[dict]) -> list[dict]:
                     db_cur.execute("""
                         UPDATE signals SET exit_price = %s, exit_date = %s
                         WHERE id = %s AND exit_price IS NULL
-                    """, (float(cur), today, p["id"]))
+                    """, (float(exit_price), today, p["id"]))
                 conn.commit()
                 conn.close()
             except Exception:
                 pass
-            # Log a SELL row so history shows why the position was closed
             save_signal(p["ticker"], {
                 "signal":           "SELL",
                 "confidence_stars": conf,
-                "rationale":        f"{label} — {pnl_sign}{pnl:.2f}% from entry ${entry:.2f}",
+                "rationale":        f"{label} [{engine}] — {pnl_sign}{pnl:.2f}% from entry ${entry:.2f}",
                 "entry_zone":       None,
                 "stop_loss":        p.get("stop_loss"),
                 "target":           p.get("target"),
-            }, cur)
-            hits.append({**p, "hit_type": hit_type, "pnl": pnl})
+            }, exit_price)
+            hits.append({**p, "hit_type": hit_type, "pnl": pnl, "current_price": exit_price})
 
     return hits
 

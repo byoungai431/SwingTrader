@@ -1208,9 +1208,9 @@ for _e6_date in e6_all_dates:
             _xp, _xr = _pos["target"], "Take-Profit"
         elif _pos["trail_active"]:
             _trail = _pos["peak_price"] * (1 - E6_TRAIL_DISTANCE_PCT)
-            if _close <= _trail:
-                _xp, _xr = _close, "Trailing Stop"
-        if _xp is None and _pos["hold"] >= E6_STALE_CUT_DAYS and _close < _pos["entry_price"] * 0.97:
+            if _low <= _trail:
+                _xp, _xr = _trail, "Trailing Stop"
+        if _xp is None and _pos["hold"] >= E6_STALE_CUT_DAYS:
             _xp, _xr = _close, f"Stale Cut ({E6_STALE_CUT_DAYS}d)"
         if _xp is None and _pos["hold"] >= E6_MAX_HOLD:
             _xp, _xr = _close, f"Max Hold ({E6_MAX_HOLD}d)"
