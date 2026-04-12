@@ -576,6 +576,241 @@ def get_sector_hunter_signal(ticker: str, sector: str, indicators: dict,
     }
 
 
+# ── ENGINE 6: RANGE REVERSION ─────────────────────────────────────────────────
+# Mirrors backtest_chop.py entry logic exactly using rolling daily history.
+# Takes full OHLCV DataFrames — needs ~60+ bars for ADX/BB/streak calculations.
+# T1 → 5★  |  T2 → 4★  |  T3 → filtered by existing <4★ gate in run_daily.py
+
+E6_BB_PERIOD           = 20
+E6_BB_STD              = 2.0
+E6_VOL_SPIKE_MIN       = 1.5
+E6_ADX_MIN             = 10
+E6_ADX_MAX             = 22
+E6_ADX_PERIOD          = 14
+E6_RSI_MIN             = 35
+E6_RSI_MAX             = 65
+E6_CHOP_BARS           = 7
+E6_RANGE_BARS          = 10
+E6_DIP_LOOKBACK        = 10
+E6_DIP_MIN_PCT         = 0.02
+E6_DIP_AVOID_LOW       = 0.05
+E6_DIP_AVOID_HIGH      = 0.09
+E6_DEEP_REBOUND_PCT    = 0.08
+E6_STRONG_RECOVER_PCT  = 0.05
+E6_SHALLOW_RECOVER_PCT = 0.08
+E6_STOP_PCT            = 0.06
+E6_TP_PCT              = 0.10
+E6_STALE_CUT_DAYS      = 12
+E6_MAX_HOLD            = 25
+E6_CONSEC_LOSS_LIMIT   = 5
+E6_LOSS_COOLDOWN_DAYS  = 15
+
+
+def _e6_adx(high, low, close, period=14):
+    """EWM-based ADX — exact formula from backtest_chop.py."""
+    import numpy as np
+    import pandas as pd
+    up_move  = high.diff()
+    dn_move  = -low.diff()
+    plus_dm  = pd.Series(np.where((up_move > dn_move) & (up_move > 0), up_move, 0.0), index=close.index)
+    minus_dm = pd.Series(np.where((dn_move > up_move) & (dn_move > 0), dn_move, 0.0), index=close.index)
+    tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
+    atr_s    = tr.ewm(com=period - 1, adjust=False).mean()
+    plus_di  = 100 * plus_dm.ewm(com=period - 1, adjust=False).mean() / atr_s
+    minus_di = 100 * minus_dm.ewm(com=period - 1, adjust=False).mean() / atr_s
+    dx       = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, float("nan"))
+    return dx.ewm(com=period - 1, adjust=False).mean()
+
+
+def _e6_consec_streak(series, condition_fn):
+    """Count consecutive bars from END of series where condition_fn(val) is True."""
+    import pandas as pd
+    count = 0
+    for val in reversed(series.values):
+        if pd.isna(val) or not condition_fn(val):
+            break
+        count += 1
+    return count
+
+
+def _e6_spy_gated(spy_df):
+    """
+    Replay SPY 50 SMA streak on last 30 bars to get current gate state.
+    Activates after 2 consecutive closes below 50 SMA, lifts after 2 above.
+    Returns True (gated/blocked) or False (open).
+    """
+    import pandas as pd
+    if spy_df is None or len(spy_df) < 55:
+        return True
+    ma50   = spy_df["Close"].rolling(50).mean()
+    below  = spy_df["Close"] < ma50
+    gated  = False
+    b_str  = 0
+    a_str  = 0
+    for val in below.iloc[-30:].values:
+        if pd.isna(val):
+            continue
+        if val:
+            b_str += 1; a_str = 0
+            if b_str >= 2:
+                gated = True
+        else:
+            a_str += 1; b_str = 0
+            if a_str >= 2:
+                gated = False
+    return gated
+
+
+def get_chop_signal(ticker: str, df: "pd.DataFrame", spy_df: "pd.DataFrame") -> dict:
+    """
+    Engine 6 Range Reversion live signal.
+    Mirrors backtest_chop.py entry logic exactly using 1yr daily OHLCV history.
+    """
+    import numpy as np
+    import pandas as pd
+
+    _NO_TRADE = {
+        "ticker": ticker, "signal": "NO TRADE", "confidence_stars": 0,
+        "strategies_aligned": [], "fundamentals_bonus": False,
+        "rationale": "E6 Range Reversion: conditions not met.",
+        "entry_zone": None, "stop_loss": None, "target": None,
+    }
+
+    if df is None or len(df) < 60:
+        return _NO_TRADE
+
+    # ── SPY gates ─────────────────────────────────────────────────────────────
+    if spy_df is None or len(spy_df) < 60:
+        return _NO_TRADE
+
+    # Gate 1: SPY must be in chop regime (ADX < 22 for 7+ consecutive bars)
+    spy_adx    = _e6_adx(spy_df["High"], spy_df["Low"], spy_df["Close"])
+    spy_streak = _e6_consec_streak(spy_adx.dropna(), lambda v: v < E6_ADX_MAX)
+    if spy_streak < E6_CHOP_BARS:
+        return _NO_TRADE
+
+    # Gate 2: SPY 50 SMA 2-bar streak gate
+    if _e6_spy_gated(spy_df):
+        return _NO_TRADE
+
+    # ── Stock indicators ──────────────────────────────────────────────────────
+    close  = df["Close"].dropna()
+    high   = df["High"].reindex(close.index)
+    low    = df["Low"].reindex(close.index)
+    volume = df["Volume"].reindex(close.index)
+
+    if len(close) < 55:
+        return _NO_TRADE
+
+    # ADX streak + current value
+    adx_series = _e6_adx(high, low, close)
+    adx_streak = _e6_consec_streak(adx_series.dropna(), lambda v: v < E6_ADX_MAX)
+    if adx_streak < E6_CHOP_BARS:
+        return _NO_TRADE
+    adx_val = float(adx_series.dropna().iloc[-1])
+    if adx_val < E6_ADX_MIN or adx_val > E6_ADX_MAX:
+        return _NO_TRADE
+
+    # Range streak (no 20-day breakout for 10+ consecutive bars)
+    high20 = high.rolling(20).max()
+    low20  = low.rolling(20).min()
+    in_range = ((close < high20) & (close > low20)).astype(int)
+    range_streak = _e6_consec_streak(in_range, lambda v: v == 1)
+    if range_streak < E6_RANGE_BARS:
+        return _NO_TRADE
+
+    # RSI
+    delta     = close.diff()
+    gain      = delta.clip(lower=0).ewm(com=13, min_periods=14).mean()
+    loss      = (-delta.clip(upper=0)).ewm(com=13, min_periods=14).mean()
+    rsi_val   = float((100 - 100 / (1 + gain / loss)).iloc[-1])
+    if rsi_val < E6_RSI_MIN or rsi_val > E6_RSI_MAX:
+        return _NO_TRADE
+
+    # Volume
+    vol_avg20 = volume.rolling(20).mean()
+    rel_vol   = float(volume.iloc[-1]) / float(vol_avg20.iloc[-1])
+    if rel_vol < E6_VOL_SPIKE_MIN:
+        return _NO_TRADE
+
+    # Bollinger Bands
+    bb_mid    = close.rolling(E6_BB_PERIOD).mean()
+    bb_lower  = bb_mid - E6_BB_STD * close.rolling(E6_BB_PERIOD).std()
+    bb_lo     = float(bb_lower.iloc[-1])
+
+    # Recent dip below lower BB (previous 10 bars, shift(1) mirrors backtest)
+    below_flag   = (close < bb_lower).astype(int)
+    recent_below = int(below_flag.iloc[-11:-1].max())
+    if recent_below != 1:
+        return _NO_TRADE
+
+    # Max dip depth + min close in lookback (previous 10 bars)
+    dip_pct_s      = ((bb_lower - close) / bb_lower).clip(lower=0)
+    max_dip        = float(dip_pct_s.iloc[-11:-1].max())
+    min_close_lb   = float(close.iloc[-11:-1].min())
+    cur_close      = float(close.iloc[-1])
+
+    # ── Entry paths ───────────────────────────────────────────────────────────
+    path_a = (E6_DIP_MIN_PCT <= max_dip < E6_DIP_AVOID_LOW) and (cur_close >= bb_lo)
+    path_b = (max_dip >= E6_DIP_AVOID_HIGH) and (cur_close >= min_close_lb * (1 + E6_DEEP_REBOUND_PCT))
+    rec_req = E6_SHALLOW_RECOVER_PCT if max_dip < E6_DIP_MIN_PCT else E6_STRONG_RECOVER_PCT
+    path_c  = (max_dip > 0) and (cur_close >= bb_lo * (1 + rec_req))
+
+    # Block ambiguous dip zone (7–9%)
+    if 0.07 <= max_dip < E6_DIP_AVOID_HIGH and cur_close < bb_lo * 1.02:
+        return _NO_TRADE
+
+    if not (path_a or path_b or path_c):
+        return _NO_TRADE
+
+    # ── Tier → confidence stars ───────────────────────────────────────────────
+    is_t1 = (
+        rel_vol >= 3.0 or
+        rsi_val < 35 or
+        (path_a and rel_vol >= 2.0) or
+        (15 <= adx_val < 18) or
+        (15 <= adx_val < 18 and 50 <= rsi_val < 65)
+    )
+    is_t2 = (not is_t1) and (
+        (1.5 <= rel_vol < 2.0) or
+        (55 <= rsi_val < 65) or
+        (2.0 <= rel_vol < 3.0) or
+        (18 <= adx_val < 22 and 35 <= rsi_val < 50)
+    )
+    conf = 5 if is_t1 else (4 if is_t2 else 3)  # T3 → filtered by <4★ gate
+
+    path_labels = (["Path A (BB dip 2–5%)"] if path_a else []) + \
+                  (["Path B (deep dip 9%+ rebound)"] if path_b else []) + \
+                  (["Path C (+5% recovery above BB)"] if path_c else [])
+    path_str   = " + ".join(path_labels)
+    tier_label = "T1 5★" if is_t1 else "T2 4★"
+    stop_price = round(cur_close * (1 - E6_STOP_PCT), 2)
+    tp_price   = round(cur_close * (1 + E6_TP_PCT), 2)
+
+    return {
+        "ticker":             ticker,
+        "signal":             "BUY",
+        "confidence_stars":   conf,
+        "strategies_aligned": [
+            f"Range Reversion E6 ({tier_label})",
+            f"{path_str}",
+            f"ADX {adx_val:.1f} ({adx_streak}d chop streak), RSI {rsi_val:.1f}, Vol {rel_vol:.1f}x",
+            f"BB dip depth {max_dip*100:.1f}% in last {E6_DIP_LOOKBACK}d",
+        ],
+        "fundamentals_bonus": False,
+        "rationale": (
+            f"{'5★' if is_t1 else '4★'} RANGE REVERSION E6: {ticker} BB mean-reversion. "
+            f"{path_str}. ADX {adx_val:.1f} ({adx_streak}-bar chop), "
+            f"RSI {rsi_val:.1f}, Vol {rel_vol:.1f}x. "
+            f"Entry ${cur_close:.2f}, Stop -6% (${stop_price:.2f}), "
+            f"Target +10% (${tp_price:.2f}), Stale {E6_STALE_CUT_DAYS}d, Max {E6_MAX_HOLD}d."
+        ),
+        "entry_zone": f"${cur_close:.2f}",
+        "stop_loss":  f"${stop_price:.2f}",
+        "target":     f"${tp_price:.2f}",
+    }
+
+
 if __name__ == "__main__":
     from fetcher import fetch_price_data
     from indicators import compute_indicators

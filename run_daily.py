@@ -21,7 +21,8 @@ from config import WATCHLIST, HISTORY_DAYS, ANTHROPIC_API_KEY, VIX_MAX
 from indicators import compute_indicators
 from fundamentals import fetch_fundamentals
 from signal_engine import (get_signal, get_index_fade_signal, get_leveraged_signal, get_regime_signal,
-                           compute_hot_sectors, get_sector_hunter_signal, E5_SECTOR_ETF_MAP)
+                           compute_hot_sectors, get_sector_hunter_signal, E5_SECTOR_ETF_MAP,
+                           get_chop_signal, E6_CONSEC_LOSS_LIMIT, E6_LOSS_COOLDOWN_DAYS)
 from history import save_signal, get_performance_stats, get_conn
 from notify import send_telegram, send_daily_summary, send_daily_telegram, send_push, send_exit_alert
 
@@ -117,6 +118,35 @@ def _in_cooldown(ticker: str, today: str, days: int = 5) -> bool:
             row = cur.fetchone()
         conn.close()
         return row is not None
+    except Exception:
+        return False
+
+
+def _in_e6_cooldown(today: str) -> bool:
+    """Return True if E6 entries should be paused (5 consecutive E6 losses within cooldown period)."""
+    try:
+        from datetime import datetime, timedelta
+        conn = get_conn()
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """SELECT exit_price, price, exit_date
+                     FROM signals
+                    WHERE signal = 'BUY' AND rationale ILIKE '%%Range Reversion E6%%'
+                      AND exit_price IS NOT NULL
+                    ORDER BY exit_date DESC
+                    LIMIT %s""",
+                (E6_CONSEC_LOSS_LIMIT,)
+            )
+            rows = cur.fetchall()
+        conn.close()
+        if len(rows) < E6_CONSEC_LOSS_LIMIT:
+            return False
+        all_losses = all(float(r["exit_price"]) < float(r["price"]) for r in rows)
+        if not all_losses:
+            return False
+        most_recent = str(rows[0]["exit_date"])[:10]
+        cutoff = (datetime.strptime(today, "%Y-%m-%d") - timedelta(days=E6_LOSS_COOLDOWN_DAYS)).strftime("%Y-%m-%d")
+        return most_recent >= cutoff
     except Exception:
         return False
 
@@ -376,6 +406,15 @@ def run():
     else:
         regime_label = "VIX unavailable — regime filter inactive"
 
+    # ── Engine 6: pre-fetch SPY df + check E6 consecutive-loss cooldown ──────
+    try:
+        _spy_df = fetch_price_data("SPY")
+    except Exception:
+        _spy_df = None
+    _e6_paused = _in_e6_cooldown(today)
+    e6_label   = f"⏸  PAUSED ({E6_CONSEC_LOSS_LIMIT} consec losses within {E6_LOSS_COOLDOWN_DAYS}d)" \
+                 if _e6_paused else "✅  Active"
+
     star5_paused = _in_5star_cooldown(today)
     star5_label  = f"⏸  PAUSED (≥{CONSEC_5STAR_LOSS_LIMIT} consec losses within {CONSEC_5STAR_COOLDOWN_DAYS}d)" \
                    if star5_paused else "✅  Active"
@@ -386,6 +425,7 @@ def run():
     print(f"  Regime:   {regime_label}")
     print(f"  5★ Entry: {star5_label}")
     print(f"  E5 Hot Sectors: {hot_sectors_str}")
+    print(f"  E6 Range Rev:   {e6_label}")
     print(f"{'='*60}\n")
 
     results          = {"BUY": [], "SELL": [], "NO TRADE": [], "ERROR": []}
@@ -444,6 +484,13 @@ def run():
                 sig_e5 = get_sector_hunter_signal(ticker, _e5_sector, ind, _hot_etfs)
                 if sig_e5.get("signal") == "BUY":
                     generated_signals.append(sig_e5)
+
+            # Engine 6: Range Reversion — S&P 500 stocks only, not ETFs/indices
+            _e6_etfs = {"SPY", "QQQ", "RWM", "PSQ", "SPXU", "SQQQ", "UPRO", "TQQQ", "TSLL", "NVDL", "IWM"}
+            if ticker not in _e6_etfs and not _e6_paused and _spy_df is not None:
+                sig_e6 = get_chop_signal(ticker, df, _spy_df)
+                if sig_e6.get("signal") == "BUY":
+                    generated_signals.append(sig_e6)
 
             if not generated_signals:
                 generated_signals.append({"ticker": ticker, "signal": "NO TRADE", "confidence_stars": 0, "rationale": "No conditions met."})
