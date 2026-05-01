@@ -23,7 +23,7 @@ from config import WATCHLIST, ANTHROPIC_API_KEY
 from notify import send_exit_alert
 from signal_engine import (compute_hot_sectors, get_sector_hunter_signal,
                            get_index_fade_signal, get_leveraged_signal,
-                           get_regime_signal, get_chop_signal)
+                           get_regime_signal, get_chop_signal, get_pattern_signal)
 
 st.set_page_config(page_title="Nexus Edge", layout="wide", page_icon="📊")
 
@@ -146,6 +146,8 @@ def conf_stars_html(n):
         )
     if n >= 4:
         return '<span style="color:#a8a8c0;font-weight:700;letter-spacing:3px;font-size:1em;">TIER 3</span>'
+    if n >= 3:
+        return '<span style="color:#cd7f32;font-weight:600;letter-spacing:2px;font-size:1em;">TIER 4</span>'
     return '<span style="color:#5a5a7a;font-weight:600;">—</span>'
 
 
@@ -1092,7 +1094,7 @@ def show_recommended_view(user_id=""):
                     SELECT id, ticker, date, signal, confidence,
                            entry_zone, stop_loss, target, price, rationale
                     FROM signals
-                    WHERE exit_date IS NULL AND signal = 'BUY' AND confidence >= 4
+                    WHERE exit_date IS NULL AND signal = 'BUY' AND confidence >= 3
                       AND NOT EXISTS (
                           SELECT 1 FROM signal_dismissals sd
                           WHERE sd.signal_id = signals.id AND sd.user_id = %s
@@ -1110,7 +1112,7 @@ def show_recommended_view(user_id=""):
                 '<div style="text-align:center;padding:60px 20px;">'
                 '<div style="font-size:40px;">🔭</div>'
                 '<div style="font-size:15px;color:#5555aa;margin-top:14px;letter-spacing:0.10em;">'
-                'No open Tier 1–3 signals on record.<br>'
+                'No open Tier 1–4 signals on record.<br>'
                 '<span style="font-size:12px;">Run the signal engine to generate new signals.</span>'
                 '</div></div>',
                 unsafe_allow_html=True
@@ -1136,7 +1138,7 @@ def show_recommended_view(user_id=""):
                     pass
             _render_signal_cards(open_rows, current_prices, user_id)
 
-    # ── Tab 2: Signal Log (all 4★/5★, entered or passed) ─────────────────────
+    # ── Tab 2: Signal Log (all tiers, entered or passed) ─────────────────────
     with tab_history:
         try:
             conn = get_conn()
@@ -1147,7 +1149,7 @@ def show_recommended_view(user_id=""):
                            p.id as position_id
                     FROM signals s
                     LEFT JOIN positions p ON p.signal_id = s.id AND p.user_id = %s
-                    WHERE s.confidence >= 4
+                    WHERE s.confidence >= 3
                       AND s.signal = 'BUY'
                     ORDER BY s.date DESC
                 """, (user_id,))
@@ -1263,104 +1265,143 @@ def show_recommended_view(user_id=""):
                 unsafe_allow_html=True
             )
 
-            st.markdown(
-                '<div style="font-size:11px;color:#8888bb;letter-spacing:0.20em;text-transform:uppercase;'
-                'margin:0 0 12px 0;padding-bottom:8px;border-bottom:1px solid #1c1c4a;">'
-                '◆ &nbsp; All Signals &nbsp; (Tier 1–3 · entered &amp; passed)</div>',
-                unsafe_allow_html=True
-            )
-
-            for r in hist_rows:
-                entry      = r["price"]
-                exit_price = r["exit_price"]
-                conf_html  = conf_stars_html(int(r["confidence"]))
-                sig_badge  = badge("▲ BUY", "green") if r["signal"] == "BUY" else badge("▼ SELL", "red")
-
-                if r["position_id"]:
-                    status_badge = (
-                        '<span style="background:rgba(57,217,138,0.15);color:#39d98a;'
-                        'border:1px solid rgba(57,217,138,0.4);padding:2px 8px;border-radius:12px;'
-                        'font-size:10px;font-weight:700;letter-spacing:1px;">ENTERED</span>'
-                    )
-                else:
-                    status_badge = (
-                        '<span style="background:rgba(100,100,170,0.15);color:#8888bb;'
-                        'border:1px solid rgba(100,100,170,0.3);padding:2px 8px;border-radius:12px;'
-                        'font-size:10px;font-weight:700;letter-spacing:1px;">PASSED</span>'
-                    )
-
-                if entry and exit_price:
-                    pnl_pct   = (exit_price - entry) / entry * 100 if r["signal"] == "BUY" \
-                                else (entry - exit_price) / entry * 100
-                    ts        = get_trade_size(r.get("date", ""), r.get("confidence"))
-                    dollar_pnl = ts * pnl_pct / 100
-                    pnl_color = "#39d98a" if pnl_pct >= 0 else "#ff6b6b"
-                    result_icon = "✅" if pnl_pct >= 0 else "❌"
-                    d_sign = "+" if dollar_pnl >= 0 else "-"
-                    pnl_str   = (
-                        f'<span style="color:{pnl_color};font-weight:700;font-size:20px;">'
-                        f'{result_icon} {pnl_pct:+.2f}%</span>'
-                        f'<span style="color:{pnl_color};font-size:13px;font-weight:500;margin-left:6px;">'
-                        f'({d_sign}${abs(dollar_pnl):,.0f})</span>'
-                    )
-                    try:
-                        from datetime import date as _date
-                        d0 = _date.fromisoformat(r["date"])
-                        d1 = _date.fromisoformat(r["exit_date"])
-                        hold_days = (d1 - d0).days
-                        date_meta = f'{r["date"]} → {r["exit_date"]} &nbsp;·&nbsp; held {hold_days}d'
-                    except Exception:
-                        date_meta = f'{r["date"]} → {r["exit_date"]}'
-                else:
-                    pnl_str   = '<span style="color:#8888bb;font-size:13px;">Open / no exit recorded</span>'
-                    date_meta = r["date"]
-
+            def _render_hist_tier(tier_rows, tier_label, tier_subtitle, tier_color):
+                if not tier_rows:
+                    return
+                t_entered = sum(1 for r in tier_rows if r["position_id"])
+                t_wins = t_closed = 0
+                t_pnl = 0.0
+                for r in tier_rows:
+                    if r["price"] and r["exit_price"]:
+                        pnl = (r["exit_price"] - r["price"]) / r["price"] * 100 if r["signal"] == "BUY" \
+                              else (r["price"] - r["exit_price"]) / r["price"] * 100
+                        t_pnl += pnl
+                        t_closed += 1
+                        if pnl >= 0:
+                            t_wins += 1
+                t_wr  = t_wins / t_closed * 100 if t_closed else 0
+                t_avg = t_pnl / t_closed if t_closed else 0
+                wr_c  = "#39d98a" if t_wr >= 50 else "#ff6b6b"
+                avg_c = "#39d98a" if t_avg >= 0 else "#ff6b6b"
+                sub_html = (f'<span style="font-size:0.80em;letter-spacing:0.10em;opacity:0.70;margin-left:6px;">'
+                            f'{tier_subtitle}</span>') if tier_subtitle else ''
                 st.markdown(
-                    f'<div class="panel" style="margin-bottom:6px;opacity:0.92;">'
-                    f'<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px;">'
-                    f'<div>'
-                    f'<span style="font-size:24px;font-weight:900;color:#c0c0ff;">{r["ticker"]}</span>'
-                    f'<span style="font-size:12px;color:#44447a;margin-left:12px;">{date_meta}</span>'
-                    f'</div>'
-                    f'<div style="display:flex;gap:8px;align-items:center;">'
-                    f'{status_badge}'
-                    f'<span style="font-size:16px;letter-spacing:2px;">{conf_html}</span>'
-                    f'{sig_badge}'
-                    f'</div>'
-                    f'</div>'
-                    f'<div style="display:flex;gap:20px;flex-wrap:wrap;align-items:center;">'
-                    f'<div style="min-width:80px;">'
-                    f'<div style="font-size:9px;color:#5555aa;letter-spacing:0.12em;text-transform:uppercase;margin-bottom:3px;">Entry</div>'
-                    f'<div style="font-size:17px;color:#c0c0ff;font-weight:600;">${f"{entry:.2f}" if entry else "—"}</div>'
-                    f'</div>'
-                    f'<div style="min-width:80px;">'
-                    f'<div style="font-size:9px;color:#5555aa;letter-spacing:0.12em;text-transform:uppercase;margin-bottom:3px;">Exit</div>'
-                    f'<div style="font-size:17px;color:#c0c0ff;font-weight:600;">${f"{exit_price:.2f}" if exit_price else "—"}</div>'
-                    f'</div>'
-                    f'<div style="min-width:100px;">'
-                    f'<div style="font-size:9px;color:#5555aa;letter-spacing:0.12em;text-transform:uppercase;margin-bottom:3px;">Result</div>'
-                    f'<div>{pnl_str}</div>'
-                    f'</div>'
-                    f'</div>'
-                    + (
-                        f'<details class="signal-details" style="margin-top:10px;">'
-                        f'<summary>▸ &nbsp; Rationale</summary>'
-                        f'<div class="rationale">{r["rationale"] or "—"}</div>'
-                        f'</details>'
-                        if r["rationale"] else ""
-                    )
-                    + f'</div>',
+                    f'<div style="font-size:11px;color:{tier_color};letter-spacing:0.18em;text-transform:uppercase;'
+                    f'font-weight:700;margin:22px 0 8px 0;padding:5px 12px;'
+                    f'background:rgba(160,144,255,0.05);border-left:3px solid {tier_color};border-radius:0 4px 4px 0;">'
+                    f'{tier_label}{sub_html} &nbsp;·&nbsp; {len(tier_rows)} signals'
+                    f'<span style="font-size:10px;color:#5a5a88;font-weight:600;margin-left:14px;">'
+                    f'Entered: {t_entered} &nbsp;·&nbsp; '
+                    f'W/R: <span style="color:{wr_c}">{t_wr:.0f}%</span>'
+                    f' &nbsp;·&nbsp; Avg: <span style="color:{avg_c}">{t_avg:+.2f}%</span>'
+                    f'</span></div>',
                     unsafe_allow_html=True
                 )
-                _, btn_col = st.columns([3, 1])
-                with btn_col:
-                    if st.button("🔭  See Analysis", key=f"view_hist_{r['ticker']}_{r['date']}", use_container_width=True):
-                        st.session_state.selected_ticker = r["ticker"]
-                        st.session_state.analyzed = False
-                        st.session_state.show_recommended = False
-                        st.session_state.results_tickers = []
-                        st.rerun()
-                st.markdown('<div style="margin-bottom:14px;"></div>', unsafe_allow_html=True)
+                for r in tier_rows:
+                    entry      = r["price"]
+                    exit_price = r["exit_price"]
+                    conf_html  = conf_stars_html(int(r["confidence"]))
+                    sig_badge  = badge("▲ BUY", "green") if r["signal"] == "BUY" else badge("▼ SELL", "red")
+                    if r["position_id"]:
+                        status_badge = (
+                            '<span style="background:rgba(57,217,138,0.15);color:#39d98a;'
+                            'border:1px solid rgba(57,217,138,0.4);padding:2px 8px;border-radius:12px;'
+                            'font-size:10px;font-weight:700;letter-spacing:1px;">ENTERED</span>'
+                        )
+                    else:
+                        status_badge = (
+                            '<span style="background:rgba(100,100,170,0.15);color:#8888bb;'
+                            'border:1px solid rgba(100,100,170,0.3);padding:2px 8px;border-radius:12px;'
+                            'font-size:10px;font-weight:700;letter-spacing:1px;">PASSED</span>'
+                        )
+                    if entry and exit_price:
+                        pnl_pct    = (exit_price - entry) / entry * 100 if r["signal"] == "BUY" \
+                                     else (entry - exit_price) / entry * 100
+                        ts         = get_trade_size(r.get("date", ""), r.get("confidence"))
+                        dollar_pnl = ts * pnl_pct / 100
+                        pnl_color  = "#39d98a" if pnl_pct >= 0 else "#ff6b6b"
+                        result_icon = "✅" if pnl_pct >= 0 else "❌"
+                        d_sign     = "+" if dollar_pnl >= 0 else "-"
+                        pnl_str    = (
+                            f'<span style="color:{pnl_color};font-weight:700;font-size:20px;">'
+                            f'{result_icon} {pnl_pct:+.2f}%</span>'
+                            f'<span style="color:{pnl_color};font-size:13px;font-weight:500;margin-left:6px;">'
+                            f'({d_sign}${abs(dollar_pnl):,.0f})</span>'
+                        )
+                        try:
+                            from datetime import date as _date
+                            d0 = _date.fromisoformat(r["date"])
+                            d1 = _date.fromisoformat(r["exit_date"])
+                            hold_days = (d1 - d0).days
+                            date_meta = f'{r["date"]} → {r["exit_date"]} &nbsp;·&nbsp; held {hold_days}d'
+                        except Exception:
+                            date_meta = f'{r["date"]} → {r["exit_date"]}'
+                    else:
+                        pnl_str   = '<span style="color:#8888bb;font-size:13px;">Open / no exit recorded</span>'
+                        date_meta = r["date"]
+                    st.markdown(
+                        f'<div class="panel" style="margin-bottom:6px;opacity:0.92;">'
+                        f'<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px;">'
+                        f'<div>'
+                        f'<span style="font-size:24px;font-weight:900;color:#c0c0ff;">{r["ticker"]}</span>'
+                        f'<span style="font-size:12px;color:#44447a;margin-left:12px;">{date_meta}</span>'
+                        f'</div>'
+                        f'<div style="display:flex;gap:8px;align-items:center;">'
+                        f'{status_badge}'
+                        f'<span style="font-size:16px;letter-spacing:2px;">{conf_html}</span>'
+                        f'{sig_badge}'
+                        f'</div>'
+                        f'</div>'
+                        f'<div style="display:flex;gap:20px;flex-wrap:wrap;align-items:center;">'
+                        f'<div style="min-width:80px;">'
+                        f'<div style="font-size:9px;color:#5555aa;letter-spacing:0.12em;text-transform:uppercase;margin-bottom:3px;">Entry</div>'
+                        f'<div style="font-size:17px;color:#c0c0ff;font-weight:600;">${f"{entry:.2f}" if entry else "—"}</div>'
+                        f'</div>'
+                        f'<div style="min-width:80px;">'
+                        f'<div style="font-size:9px;color:#5555aa;letter-spacing:0.12em;text-transform:uppercase;margin-bottom:3px;">Exit</div>'
+                        f'<div style="font-size:17px;color:#c0c0ff;font-weight:600;">${f"{exit_price:.2f}" if exit_price else "—"}</div>'
+                        f'</div>'
+                        f'<div style="min-width:100px;">'
+                        f'<div style="font-size:9px;color:#5555aa;letter-spacing:0.12em;text-transform:uppercase;margin-bottom:3px;">Result</div>'
+                        f'<div>{pnl_str}</div>'
+                        f'</div>'
+                        f'</div>'
+                        + (
+                            f'<details class="signal-details" style="margin-top:10px;">'
+                            f'<summary>▸ &nbsp; Rationale</summary>'
+                            f'<div class="rationale">{r["rationale"] or "—"}</div>'
+                            f'</details>'
+                            if r["rationale"] else ""
+                        )
+                        + f'</div>',
+                        unsafe_allow_html=True
+                    )
+                    _, btn_col = st.columns([3, 1])
+                    with btn_col:
+                        if st.button("🔭  See Analysis", key=f"view_hist_{r['ticker']}_{r['date']}", use_container_width=True):
+                            st.session_state.selected_ticker = r["ticker"]
+                            st.session_state.analyzed = False
+                            st.session_state.show_recommended = False
+                            st.session_state.results_tickers = []
+                            st.rerun()
+                    st.markdown('<div style="margin-bottom:14px;"></div>', unsafe_allow_html=True)
+
+            _render_hist_tier(
+                [r for r in hist_rows if int(r["confidence"] or 0) >= 6],
+                "TIER 1", "HIGH CONVICTION", "#40E0FF"
+            )
+            _render_hist_tier(
+                [r for r in hist_rows if int(r["confidence"] or 0) == 5],
+                "TIER 2", "CONFIDENT", "#f9c846"
+            )
+            _render_hist_tier(
+                [r for r in hist_rows if int(r["confidence"] or 0) == 4],
+                "TIER 3", "DOUBLE BOTTOM (E7)", "#a8a8c0"
+            )
+            _render_hist_tier(
+                [r for r in hist_rows if int(r["confidence"] or 0) == 3],
+                "TIER 4", "RANGE REVERSION (E6)", "#cd7f32"
+            )
 
 
 # ── My Positions view ─────────────────────────────────────────────────────────
@@ -1928,6 +1969,14 @@ if auto_run or selected_tickers != cached_tickers:
                     if sig_e6.get("signal") == "BUY":
                         save_signal(ticker, sig_e6, ind["latest_close"])
                         extra_sigs.append(sig_e6)
+
+                # Engine 7: Double Bottom Pattern
+                _e7_skip = {"SPY", "QQQ", "RWM", "PSQ", "SPXU", "SQQQ", "UPRO", "TQQQ", "TSLL", "NVDL", "IWM"}
+                if ticker not in _e7_skip and _spy_df is not None:
+                    sig_e7 = get_pattern_signal(ticker, df, _spy_df)
+                    if sig_e7.get("signal") == "BUY":
+                        save_signal(ticker, sig_e7, ind["latest_close"])
+                        extra_sigs.append(sig_e7)
             results.append({"ticker": ticker, "ind": ind, "sig": sig, "df": df, "fund": fund,
                             "extra_sigs": extra_sigs})
         except Exception as _scan_err:

@@ -777,13 +777,13 @@ def get_chop_signal(ticker: str, df: "pd.DataFrame", spy_df: "pd.DataFrame") -> 
         (2.0 <= rel_vol < 3.0) or
         (18 <= adx_val < 22 and 35 <= rsi_val < 50)
     )
-    conf = 5 if is_t1 else (4 if is_t2 else 3)  # T3 → filtered by <4★ gate
+    conf = 5 if is_t1 else 3  # T2/T3 both 3★ (Tier 4); only E7 is Tier 3 (4★)
 
     path_labels = (["Path A (BB dip 2–5%)"] if path_a else []) + \
                   (["Path B (deep dip 9%+ rebound)"] if path_b else []) + \
                   (["Path C (+5% recovery above BB)"] if path_c else [])
     path_str   = " + ".join(path_labels)
-    tier_label = "T1 5★" if is_t1 else "T2 4★"
+    tier_label = "T1 5★" if is_t1 else ("T2 3★" if is_t2 else "T3 3★")
     stop_price = round(cur_close * (1 - E6_STOP_PCT), 2)
     tp_price   = round(cur_close * (1 + E6_TP_PCT), 2)
 
@@ -799,7 +799,7 @@ def get_chop_signal(ticker: str, df: "pd.DataFrame", spy_df: "pd.DataFrame") -> 
         ],
         "fundamentals_bonus": False,
         "rationale": (
-            f"{'5★' if is_t1 else '4★'} RANGE REVERSION E6: {ticker} BB mean-reversion. "
+            f"{'5★' if is_t1 else '3★'} RANGE REVERSION E6: {ticker} BB mean-reversion. "
             f"{path_str}. ADX {adx_val:.1f} ({adx_streak}-bar chop), "
             f"RSI {rsi_val:.1f}, Vol {rel_vol:.1f}x. "
             f"Entry ${cur_close:.2f}, Stop -6% (${stop_price:.2f}), "
@@ -809,6 +809,142 @@ def get_chop_signal(ticker: str, df: "pd.DataFrame", spy_df: "pd.DataFrame") -> 
         "stop_loss":  f"${stop_price:.2f}",
         "target":     f"${tp_price:.2f}",
     }
+
+
+# ── ENGINE 7: DOUBLE BOTTOM PATTERN ───────────────────────────────────────────
+# Early bounce entry before neckline breakout.
+# SPY > MA200 + stock > MA200 + bounce_count ≥ 2 in last 20 bars.
+E7_MAX_RECENCY_BARS = 25
+E7_VOL_CONFIRM_MULT = 1.2
+E7_TOUCH_WINDOW     = 20
+E7_MAX_STOP_PCT     = 0.12
+E7_ENTRY_STOP_PCT   = 0.07
+E7_HARD_TP_PCT      = 0.15
+
+
+def get_pattern_signal(ticker: str, df: "pd.DataFrame", spy_df: "pd.DataFrame") -> dict:
+    """
+    Engine 7: Double Bottom early bounce entry.
+    Mirrors backtest_combined.py PATTERN strategy logic.
+    Requires full OHLCV DataFrame (1y history) for both ticker and SPY.
+    """
+    import pandas as pd
+    from patterns import detect_double_bottom
+
+    _NO_TRADE = {
+        "ticker": ticker, "signal": "NO TRADE", "confidence_stars": 0,
+        "strategies_aligned": [], "fundamentals_bonus": False,
+        "rationale": "E7 Pattern: conditions not met.",
+        "entry_zone": None, "stop_loss": None, "target": None,
+    }
+
+    if df is None or len(df) < 210:
+        return _NO_TRADE
+    if spy_df is None or len(spy_df) < 210:
+        return _NO_TRADE
+
+    # SPY bull regime (SPY close > MA200)
+    spy_close = float(spy_df["Close"].dropna().iloc[-1])
+    spy_ma200 = spy_df["Close"].rolling(200).mean().dropna()
+    if len(spy_ma200) == 0 or spy_close <= float(spy_ma200.iloc[-1]):
+        return _NO_TRADE
+
+    # Stock must be above MA200
+    close_s   = df["Close"].dropna()
+    if len(close_s) < 210:
+        return _NO_TRADE
+    ma200_val = float(close_s.rolling(200).mean().iloc[-1])
+    cur_close = float(close_s.iloc[-1])
+    if pd.isna(ma200_val) or cur_close <= ma200_val:
+        return _NO_TRADE
+
+    # Today's bar data
+    open_s    = df["Open"].reindex(close_s.index)
+    low_s     = df["Low"].reindex(close_s.index)
+    vol_s     = df["Volume"].reindex(close_s.index)
+    cur_open  = float(open_s.iloc[-1])
+    vol_today = float(vol_s.iloc[-1])
+    vol_avg20 = float(vol_s.rolling(20).mean().iloc[-1])
+
+    is_green = cur_close > cur_open
+    vol_ok   = vol_avg20 > 0 and vol_today >= vol_avg20 * E7_VOL_CONFIRM_MULT
+
+    if not (is_green and vol_ok):
+        return _NO_TRADE
+
+    # Detect double bottom patterns (exclude today so detection is forward-clean)
+    try:
+        results = detect_double_bottom(df.iloc[:-1])
+    except Exception:
+        results = []
+
+    for r in results:
+        if r.get("recency_bars", 999) > E7_MAX_RECENCY_BARS:
+            continue
+        if r.get("confirmed"):
+            continue
+        neckline     = r["neckline"]
+        low1_y       = r["low1_y"]
+        low2_y       = r["low2_y"]
+        avg_low      = r["avg_low"]
+        bounce_level = low1_y
+
+        # Quality: 2nd low >= 1st low, pattern depth >= 7%
+        if low2_y < low1_y * 0.995:
+            continue
+        if (neckline - avg_low) / neckline < 0.07:
+            continue
+
+        struct_stop = round(bounce_level * 0.98, 2)
+        if (bounce_level - struct_stop) / bounce_level > E7_MAX_STOP_PCT:
+            continue
+
+        # Entry gate: close >= 3% above support, >= 3% below neckline
+        if cur_close < bounce_level * 1.03:
+            continue
+        if cur_close >= neckline * 0.97:
+            continue
+
+        # Count bounces in last TOUCH_WINDOW bars
+        n = len(close_s)
+        lookback_start = max(0, n - E7_TOUCH_WINDOW - 1)
+        bounce_count = 0
+        for i in range(lookback_start, n - 1):  # exclude today
+            row_low   = float(low_s.iloc[i])
+            row_close = float(close_s.iloc[i])
+            if row_low <= bounce_level * 1.02 and row_close > bounce_level:
+                bounce_count += 1
+
+        if bounce_count < 2:
+            continue
+
+        # Valid pattern — generate signal
+        stop_price = round(max(struct_stop, cur_close * (1 - E7_ENTRY_STOP_PCT)), 2)
+        tp_price   = round(cur_close * (1 + E7_HARD_TP_PCT), 2)
+        vol_ratio  = vol_today / vol_avg20 if vol_avg20 > 0 else 0
+
+        return {
+            "ticker":             ticker,
+            "signal":             "BUY",
+            "confidence_stars":   4,
+            "strategies_aligned": [
+                f"Double Bottom (E7): support ${bounce_level:.2f}, neckline ${neckline:.2f}",
+                f"Bounce count {bounce_count} in last {E7_TOUCH_WINDOW} bars",
+                f"Vol {vol_ratio:.1f}x avg, green bar, SPY + stock above MA200",
+            ],
+            "fundamentals_bonus": False,
+            "rationale": (
+                f"4★ DOUBLE BOTTOM PATTERN E7: {ticker} bouncing off support ${bounce_level:.2f} "
+                f"({bounce_count} confirmed touches). Neckline ${neckline:.2f}. "
+                f"Entry ${cur_close:.2f}, Stop -7% (${stop_price:.2f}), "
+                f"Target +15% (${tp_price:.2f}), Max Hold 20d, Stale Cut 14d."
+            ),
+            "entry_zone": f"${cur_close:.2f}",
+            "stop_loss":  f"${stop_price:.2f}",
+            "target":     f"${tp_price:.2f}",
+        }
+
+    return _NO_TRADE
 
 
 if __name__ == "__main__":

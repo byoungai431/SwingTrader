@@ -22,7 +22,8 @@ from indicators import compute_indicators
 from fundamentals import fetch_fundamentals
 from signal_engine import (get_signal, get_index_fade_signal, get_leveraged_signal, get_regime_signal,
                            compute_hot_sectors, get_sector_hunter_signal, E5_SECTOR_ETF_MAP,
-                           get_chop_signal, E6_CONSEC_LOSS_LIMIT, E6_LOSS_COOLDOWN_DAYS)
+                           get_chop_signal, E6_CONSEC_LOSS_LIMIT, E6_LOSS_COOLDOWN_DAYS,
+                           get_pattern_signal)
 from history import save_signal, get_performance_stats, get_conn
 from notify import send_telegram, send_daily_summary, send_daily_telegram, send_push, send_exit_alert
 
@@ -303,6 +304,8 @@ def _detect_engine(rationale: str) -> str:
     r = (rationale or "").lower()
     if "range reversion e6" in r:
         return "E6"
+    if "double bottom pattern e7" in r:
+        return "E7"
     if "sector hunter" in r:
         return "E5"
     if "regime" in r:
@@ -327,6 +330,7 @@ _ENGINE_PARAMS = {
     "E4": {"trail_trigger": 0.17, "trail_distance": 0.10, "max_hold": 90, "max_hold_5star": 90, "stale_cut": None, "stale_unconditional": False},
     "E5": {"trail_trigger": 0.08, "trail_distance": 0.04, "max_hold": 30, "max_hold_5star": 30, "stale_cut": 15,  "stale_unconditional": False},
     "E6": {"trail_trigger": 0.08, "trail_distance": 0.04, "max_hold": 25, "max_hold_5star": 25, "stale_cut": 12,  "stale_unconditional": True},
+    "E7": {"trail_trigger": 0.06, "trail_distance": 0.03, "max_hold": 20, "max_hold_5star": 20, "stale_cut": 14,  "stale_unconditional": False},
 }
 
 
@@ -587,6 +591,13 @@ def run():
                 if sig_e6.get("signal") == "BUY":
                     generated_signals.append(sig_e6)
 
+            # Engine 7: Double Bottom Pattern — S&P 500 stocks only, not ETFs/indices
+            _e7_etfs = {"SPY", "QQQ", "RWM", "PSQ", "SPXU", "SQQQ", "UPRO", "TQQQ", "TSLL", "NVDL", "IWM"}
+            if ticker not in _e7_etfs and _spy_df is not None:
+                sig_e7 = get_pattern_signal(ticker, df, _spy_df)
+                if sig_e7.get("signal") == "BUY":
+                    generated_signals.append(sig_e7)
+
             if not generated_signals:
                 generated_signals.append({"ticker": ticker, "signal": "NO TRADE", "confidence_stars": 0, "rationale": "No conditions met."})
 
@@ -646,9 +657,9 @@ def run():
                         signal = "NO TRADE"
                         sig["signal"] = "NO TRADE"
 
-                # Drop sub-4★ signals
-                if signal in ("BUY", "SELL") and conf < 4:
-                    print(f"         ✂️  Conf {conf}★ < 4★ minimum — skipping {target_ticker}")
+                # Drop sub-3★ signals
+                if signal in ("BUY", "SELL") and conf < 3:
+                    print(f"         ✂️  Conf {conf}★ < 3★ minimum — skipping {target_ticker}")
                     signal = "NO TRADE"
                     sig["signal"] = "NO TRADE"
 

@@ -75,12 +75,14 @@ _CSS = """
 
 
 def _stars_html(conf: int) -> str:
-    """Return a styled HTML star span. Tiers: 6=5★MAX (blue diamond), 5=5★ (gold), 4=4★ (silver)."""
+    """Return a styled HTML star span. Tiers: 6=5★MAX (blue diamond), 5=5★ (gold), 4=4★ (silver), 3=3★ (bronze)."""
     if conf >= 6:
         return '<span class="stars-max">💎💎💎💎💎</span>'
     if conf >= 5:
         return '<span class="stars">★★★★★</span>'
-    return '<span class="stars-4">★★★★☆</span>'
+    if conf >= 4:
+        return '<span class="stars-4">★★★★☆</span>'
+    return '<span class="stars-4" style="color:#cd7f32;">★★★☆☆</span>'
 
 
 def _stars_text(conf: int) -> str:
@@ -89,7 +91,9 @@ def _stars_text(conf: int) -> str:
         return "💎💎💎💎💎"
     if conf >= 5:
         return "⭐⭐⭐⭐⭐"
-    return "🔘🔘🔘🔘☆"
+    if conf >= 4:
+        return "🔘🔘🔘🔘☆"
+    return "🔶🔶🔶☆☆"
 
 
 def _signal_card_html(s: dict) -> str:
@@ -426,14 +430,14 @@ def send_telegram(signals: list[dict]) -> bool:
 # ── End-of-day Telegram summary (4★/5★ only) ─────────────────────────────────
 
 def send_daily_telegram(signals: list[dict]) -> bool:
-    """Send an end-of-day Telegram summary for 4★/5★ signals only.
+    """Send an end-of-day Telegram summary for 3★+ signals.
 
     Always sends — if no qualifying signals, explicitly states so.
     """
     if not TELEGRAM_ENABLED:
         return False
 
-    high_conf = [s for s in signals if (s.get("confidence") or 0) >= 4]
+    high_conf = [s for s in signals if (s.get("confidence") or 0) >= 3]
     buys  = [s for s in high_conf if s.get("signal") == "BUY"]
     sells = [s for s in high_conf if s.get("signal") == "SELL"]
 
@@ -444,12 +448,12 @@ def send_daily_telegram(signals: list[dict]) -> bool:
     lines = [
         "⭐ <b>SWINGTRADER DAILY SUMMARY</b>",
         f"<i>{date}</i>",
-        "<i>4★ + 5★ signals only</i>",
+        "<i>3★ + signals</i>",
         "",
     ]
 
     if not buys and not sells:
-        lines.append("📭 No 4★ or 5★ signals today.")
+        lines.append("📭 No 3★ or higher signals today.")
     else:
         if buys:
             lines.append(f"🚀 <b>BUY ({len(buys)})</b>")
