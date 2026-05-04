@@ -829,12 +829,21 @@ def price_chart(df, sig, ind, e7_setup=None):
         # ── W1 and W2 circle markers ───────────────────────────────────────────
         try:
             w1_ts = pd.Timestamp(w1_date)
+            # Normalize to tz-naive so comparison with chart index always works
+            idx0 = chart_df.index[0]
+            if hasattr(idx0, "tzinfo") and idx0.tzinfo is not None:
+                idx0 = idx0.tz_localize(None)
+            if w1_ts.tzinfo is not None:
+                w1_ts = w1_ts.tz_localize(None)
+            # Also strip tz from the chart index so Plotly x-axis accepts it
+            chart_dates = chart_df.index.tz_localize(None) if chart_df.index.tzinfo is not None else chart_df.index
+
             xs, ys, labels = [], [], []
-            if w1_ts >= chart_df.index[0]:
+            if w1_ts >= idx0:
                 xs.append(w1_ts);  ys.append(w1_price);  labels.append("W1")
             # W2 marker: show on last bar only when price is in zone
             if in_zone:
-                xs.append(chart_df.index[-1])
+                xs.append(chart_dates[-1])
                 ys.append(float(chart_df["Close"].iloc[-1]))
                 labels.append("W2")
             if xs:
