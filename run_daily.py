@@ -518,6 +518,17 @@ def run():
     star5_label  = f"⏸  PAUSED (≥{CONSEC_5STAR_LOSS_LIMIT} consec losses within {CONSEC_5STAR_COOLDOWN_DAYS}d)" \
                    if star5_paused else "✅  Active"
 
+    # ── Engine 7: SPY > MA50 regime gate ──────────────────────────────────────
+    try:
+        _spy_close_s = _spy_df["Close"].squeeze().dropna()
+        _spy_ma50    = float(_spy_close_s.rolling(50).mean().iloc[-1])
+        _spy_now     = float(_spy_close_s.iloc[-1])
+        e7_label = f"✅  Active (SPY ${_spy_now:.2f} > MA50 ${_spy_ma50:.2f})" \
+                   if _spy_now > _spy_ma50 \
+                   else f"⏸  GATED — SPY below MA50 (${_spy_now:.2f} ≤ ${_spy_ma50:.2f})"
+    except Exception:
+        e7_label = "⚠️  SPY data unavailable"
+
     print(f"\n{'='*60}")
     print(f"  SwingTrader Daily Run — {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print(f"  Universe: {source}")
@@ -525,6 +536,7 @@ def run():
     print(f"  5★ Entry: {star5_label}")
     print(f"  E5 Hot Sectors: {hot_sectors_str}")
     print(f"  E6 Range Rev:   {e6_label}")
+    print(f"  E7 Dbl Bottom:  {e7_label}")
     print(f"{'='*60}\n")
 
     results          = {"BUY": [], "SELL": [], "NO TRADE": [], "ERROR": []}
@@ -546,57 +558,53 @@ def run():
 
             ind  = compute_indicators(df, ticker)
 
-            # Skip neutral-RSI stocks — Claude almost never signals here
-            rsi = ind.get("rsi")
-            if rsi is not None and 40 < float(rsi) < 60:
-                rsi_filtered += 1
-                continue
-
-            fund = fetch_fundamentals(ticker)
-            
             # Evaluate multiple engines
             generated_signals = []
-            
-            # Engine 1: Core Long Swing (Skip ETFs/Indices for core swing)
-            if ticker not in ["SPY", "QQQ", "RWM", "PSQ", "SPXU", "SQQQ", "UPRO", "TQQQ", "TSLL", "NVDL", "IWM"]:
-                generated_signals.append(get_signal(ticker, ind, fund))
-                
-            # Engine 2: Index Fade
+            _rule_etfs = {"SPY", "QQQ", "RWM", "PSQ", "SPXU", "SQQQ", "UPRO", "TQQQ", "TSLL", "NVDL", "IWM"}
+
+            # Engine 2: Index Fade (rule-based — no RSI dependency)
             sig_fade = get_index_fade_signal(ticker, ind)
             if sig_fade.get("signal") in ("BUY", "SELL"):
                 generated_signals.append(sig_fade)
-                
-            # Engine 3: Leveraged Shock-Bounce
+
+            # Engine 3: Leveraged Shock-Bounce (rule-based — no RSI dependency)
             sig_lev = get_leveraged_signal(ticker, ind)
             if sig_lev.get("signal") in ("BUY", "SELL"):
                 generated_signals.append(sig_lev)
 
-            # Engine 4: SPY Regime Momentum — only fires once when ticker is SPY
+            # Engine 4: SPY Regime Momentum (rule-based — SPY only)
             if ticker == "SPY":
                 sig_regime = get_regime_signal(ind)
                 if sig_regime.get("signal") == "BUY":
                     generated_signals.append(sig_regime)
 
-            # Engine 5: Sector Hunter — S&P 500 stocks only (not ETFs/indices)
+            # Engine 5: Sector Hunter (rule-based — no RSI dependency)
             _e5_sector = _sector_map.get(ticker)
             if _e5_sector and _hot_etfs:
                 sig_e5 = get_sector_hunter_signal(ticker, _e5_sector, ind, _hot_etfs)
                 if sig_e5.get("signal") == "BUY":
                     generated_signals.append(sig_e5)
 
-            # Engine 6: Range Reversion — S&P 500 stocks only, not ETFs/indices
-            _e6_etfs = {"SPY", "QQQ", "RWM", "PSQ", "SPXU", "SQQQ", "UPRO", "TQQQ", "TSLL", "NVDL", "IWM"}
-            if ticker not in _e6_etfs and not _e6_paused and _spy_df is not None:
+            # Engine 6: Range Reversion (rule-based — no RSI dependency)
+            if ticker not in _rule_etfs and not _e6_paused and _spy_df is not None:
                 sig_e6 = get_chop_signal(ticker, df, _spy_df)
                 if sig_e6.get("signal") == "BUY":
                     generated_signals.append(sig_e6)
 
-            # Engine 7: Double Bottom Pattern — S&P 500 stocks only, not ETFs/indices
-            _e7_etfs = {"SPY", "QQQ", "RWM", "PSQ", "SPXU", "SQQQ", "UPRO", "TQQQ", "TSLL", "NVDL", "IWM"}
-            if ticker not in _e7_etfs and _spy_df is not None:
+            # Engine 7: Double Bottom (rule-based — no RSI dependency)
+            if ticker not in _rule_etfs and _spy_df is not None:
                 sig_e7 = get_pattern_signal(ticker, df, _spy_df)
                 if sig_e7.get("signal") == "BUY":
                     generated_signals.append(sig_e7)
+
+            # Engine 1: Core Long Swing — Claude AI call; skip neutral RSI (AI rarely signals here)
+            rsi = ind.get("rsi")
+            rsi_neutral = rsi is not None and 40 < float(rsi) < 60
+            if rsi_neutral:
+                rsi_filtered += 1
+            elif ticker not in _rule_etfs:
+                fund = fetch_fundamentals(ticker)
+                generated_signals.append(get_signal(ticker, ind, fund))
 
             if not generated_signals:
                 generated_signals.append({"ticker": ticker, "signal": "NO TRADE", "confidence_stars": 0, "rationale": "No conditions met."})
@@ -689,9 +697,10 @@ def run():
 
                 results[signal if signal in results else "ERROR"].append(target_ticker)
 
-                stars = "★" * conf + "☆" * (5 - conf)
+                stars  = "★" * conf + "☆" * (5 - conf)
+                eng    = f"[{_detect_engine(sig.get('rationale', ''))}]" if signal != "NO TRADE" else ""
                 if signal != "NO TRADE" or target_ticker == ticker:
-                    print(f"  {target_ticker:<6}  {signal:<8}  {stars}  (Base: ${base_price:.2f})")
+                    print(f"  {target_ticker:<6}  {signal:<8}  {eng:<6}  {stars}  (Base: ${base_price:.2f})")
                 if sig.get("rationale") and signal != "NO TRADE":
                     print(f"         {sig['rationale'][:120]}")
 
