@@ -997,6 +997,7 @@ def scan_e7_watching(ticker: str, df, spy_df):
     lb_close = close_s.iloc[-(E7_LOOKBACK + 1):-1]
     lb_low   = low_s.iloc[-(E7_LOOKBACK + 1):-1]
     lb_high  = high_s.iloc[-(E7_LOOKBACK + 1):-1]
+    lb_open  = open_s.iloc[-(E7_LOOKBACK + 1):-1]
     n = len(lb_close)
     if n < E7_ORDER_W1 * 2 + E7_MIN_SEP + 5:
         return None
@@ -1004,6 +1005,7 @@ def scan_e7_watching(ticker: str, df, spy_df):
     lows_arr  = lb_low.values
     close_arr = lb_close.values
     highs_arr = lb_high.values
+    open_arr  = lb_open.values
 
     min_idxs = argrelextrema(lows_arr, np.less, order=E7_ORDER_W1)[0]
     min_idxs = [i for i in min_idxs if i <= n - E7_MIN_SEP - 1]
@@ -1025,12 +1027,20 @@ def scan_e7_watching(ticker: str, df, spy_df):
         if cur_close < w1_price * (1 - E7_CANCEL_PCT):
             continue
 
-        # Skip if W2 zone was already visited after the neckline formed —
-        # pattern already played out (either we took it or missed it)
-        neck_local     = int(np.argmax(close_arr[w1_local_idx:])) + w1_local_idx
-        post_neck_lows = lows_arr[neck_local + 1:]
-        if len(post_neck_lows) > 0 and np.any(post_neck_lows <= zone_top):
-            continue
+        # Skip if W2 already played out: price dipped into zone AND had a
+        # bullish confirming close back above zone_top (took it or missed it)
+        neck_local      = int(np.argmax(close_arr[w1_local_idx:])) + w1_local_idx
+        post_nl         = lows_arr[neck_local + 1:]
+        post_nc         = close_arr[neck_local + 1:]
+        post_no         = open_arr[neck_local + 1:]
+        if len(post_nl) > 0 and np.any(post_nl <= zone_top):
+            first_zone  = int(np.argmax(post_nl <= zone_top))
+            w2_confirmed = any(
+                post_nc[i] > zone_top and post_nc[i] > post_no[i]
+                for i in range(first_zone, len(post_nc))
+            )
+            if w2_confirmed:
+                continue
 
         # Depth from prior high
         pre_start  = max(0, w1_local_idx - E7_DEPTH_WINDOW)
