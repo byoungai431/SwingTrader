@@ -793,7 +793,6 @@ E7_BAR_BODY_STRONG = 0.010
 E7_VOL_MULT        = 1.5
 E7_VOL_MULT_RELAX  = 1.2
 E7_STOP_PCT        = 0.06
-E7_W1_MAX_AGE      = 60   # max bars since W1 for watching list (keeps setups fresh)
 
 
 def get_pattern_signal(ticker: str, df: "pd.DataFrame", spy_df: "pd.DataFrame") -> dict:
@@ -1010,11 +1009,8 @@ def scan_e7_watching(ticker: str, df, spy_df):
     min_idxs = [i for i in min_idxs if i <= n - E7_MIN_SEP - 1]
 
     for w1_local_idx in reversed(min_idxs):
-        # Skip W1s that are too old — pattern has had time to play out
-        if (n - 1 - w1_local_idx) > E7_W1_MAX_AGE:
-            continue
-
         w1_price = float(lows_arr[w1_local_idx])
+        zone_top = w1_price * (1 + E7_ZONE_PCT)
 
         # Neckline = highest close from W1 onward in lookback
         neckline = float(close_arr[w1_local_idx:].max())
@@ -1027,6 +1023,13 @@ def scan_e7_watching(ticker: str, df, spy_df):
 
         # Support not broken
         if cur_close < w1_price * (1 - E7_CANCEL_PCT):
+            continue
+
+        # Skip if W2 zone was already visited after the neckline formed —
+        # pattern already played out (either we took it or missed it)
+        neck_local     = int(np.argmax(close_arr[w1_local_idx:])) + w1_local_idx
+        post_neck_lows = lows_arr[neck_local + 1:]
+        if len(post_neck_lows) > 0 and np.any(post_neck_lows <= zone_top):
             continue
 
         # Depth from prior high
@@ -1048,7 +1051,6 @@ def scan_e7_watching(ticker: str, df, spy_df):
         if w1_velocity < E7_VELOCITY_MIN or w1_velocity > E7_VELOCITY_MAX:
             continue
 
-        zone_top       = w1_price * (1 + E7_ZONE_PCT)
         in_zone        = cur_close <= zone_top
         pct_above_zone = max(0.0, (cur_close - zone_top) / zone_top)
 
