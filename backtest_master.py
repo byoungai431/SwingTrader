@@ -1,5 +1,5 @@
 """
-backtest_master.py — The Ultimate All-Weather 6-Engine Combined Backtest
+backtest_master.py — The Ultimate All-Weather 7-Engine Combined Backtest
 =======================================================================
 Runs all engines independently on a shared account:
 1 - CORE SWING:        Oversold pullbacks in Bull Regimes on S&P 500
@@ -8,8 +8,9 @@ Runs all engines independently on a shared account:
 4 - REGIME MOMENTUM:   SPY trend-following via UPRO
 5 - SECTOR HUNTER:     Oversold dips in hot sectors
 6 - RANGE REVERSION:   BB mean-reversion in sideways/chop markets
+7 - DOUBLE BOTTOM:     W2 anticipation off confirmed W1 swing lows
 
-Period: 2010-01-01 → 2026-01-01
+Period: 2020-01-01 → 2026-01-01
 """
 
 import io
@@ -20,6 +21,7 @@ import pandas as pd
 import yfinance as yf
 import urllib.request
 from datetime import datetime
+from scipy.signal import argrelextrema
 
 # ── Paths ───────────────────────────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(__file__)
@@ -27,7 +29,7 @@ OUT_DIR  = os.path.join(BASE_DIR, "backtest results")
 os.makedirs(OUT_DIR, exist_ok=True)
 
 # ── Date range ─────────────────────────────────────────────────────────────────
-START_DATE = "2010-01-01"
+START_DATE = "2020-01-01"
 END_DATE   = "2026-01-01"
 
 # ── Shared position sizing ──────────────────────────────────────────────────────
@@ -214,6 +216,32 @@ E6_TRAIL_DISTANCE_PCT  = 0.04
 TIER1_SIZE_MULT        = 1.50
 TIER2_SIZE_MULT        = 1.00
 TIER3_SIZE_MULT        = 0.80
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ENGINE 7 — DOUBLE BOTTOM W2 ANTICIPATION config
+# ═══════════════════════════════════════════════════════════════════════════════
+E7_LOOKBACK        = 150
+E7_ORDER_W1        = 10
+E7_MIN_SEP         = 15
+E7_ZONE_PCT        = 0.05
+E7_ZONE_CANCEL_PCT = 0.04
+E7_TOUCH_PCT       = 0.01
+E7_CONFIRM_BARS    = 5
+E7_NECKLINE_MIN    = 0.03
+E7_DEPTH_WINDOW    = 30
+E7_DEPTH_MIN       = 0.05
+E7_VELOCITY_MIN    = 0.005
+E7_VELOCITY_MAX    = 0.015
+E7_BAR_BODY_MIN    = 0.006
+E7_BAR_BODY_STRONG = 0.010
+E7_VOL_MULT        = 1.5
+E7_VOL_MULT_RELAX  = 1.2
+E7_STOP_PCT        = 0.06
+E7_TRAIL_PCT       = 0.05
+E7_STALL_GAIN_PCT  = 0.07
+E7_STALL_BARS      = 7
+E7_STALL_TRAIL_PCT = 0.03
+E7_STALE_DAYS      = 35
 
 
 # ── Load S&P 500 tickers ────────────────────────────────────────────────────────
@@ -1346,6 +1374,218 @@ all_trades.extend(chop_trades)
 print(f"  Engine 6 complete: {len(chop_trades)} trades ({e6_cool_triggers} portfolio freezes)\n")
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# ENGINE 7 — DOUBLE BOTTOM W2 ANTICIPATION LOOP
+# ═══════════════════════════════════════════════════════════════════════════════
+print("Running ENGINE 7: DOUBLE BOTTOM (W2 Anticipation)...")
+e7_trades    = []
+e7_open_pos  = {}
+e7_pending   = {}
+e7_watching  = {}
+e7_entered   = set()
+
+_e7_spy_ma50  = ticker_dfs["SPY"]["ma50"] if "SPY" in ticker_dfs else pd.Series(dtype=float)
+_e7_dates     = [d for d in ticker_dfs["SPY"].index if d >= START_TS] if "SPY" in ticker_dfs else []
+
+for _e7_date in _e7_dates:
+    if _e7_date not in _e7_spy_ma50.index or pd.isna(_e7_spy_ma50.loc[_e7_date]):
+        continue
+    _e7_spy_close   = float(ticker_dfs["SPY"].loc[_e7_date, "Close"])
+    _e7_spy_above50 = _e7_spy_close > float(_e7_spy_ma50.loc[_e7_date])
+
+    # ── Fill pending entries at today's open ──────────────────────────────
+    _e7_filled = []
+    for _tk, _pend in e7_pending.items():
+        if _tk in e7_open_pos:
+            _e7_filled.append(_tk); continue
+        if _tk not in ticker_dfs or _e7_date not in ticker_dfs[_tk].index:
+            _e7_filled.append(_tk); continue
+        _op = float(ticker_dfs[_tk].loc[_e7_date, "Open"])
+        e7_open_pos[_tk] = {
+            "entry_date":   _e7_date,
+            "entry_price":  _op,
+            "pivot_price":  _pend["pivot_price"],
+            "neckline":     _pend["neckline"],
+            "w1_depth":     _pend["w1_depth"],
+            "w1_velocity":  _pend["w1_velocity"],
+            "size":         _pend["size"],
+            "hold_days":    0,
+            "peak_price":   _op,
+            "trail_active": False,
+        }
+        _e7_filled.append(_tk)
+    for _tk in _e7_filled:
+        e7_pending.pop(_tk, None)
+
+    # ── Confirming bar check for watched setups ────────────────────────────
+    _e7_confirmed = []
+    for _tk, _watch in e7_watching.items():
+        if _tk in e7_open_pos or _tk in e7_pending:
+            _e7_confirmed.append(_tk); continue
+        if _tk not in ticker_dfs or _e7_date not in ticker_dfs[_tk].index:
+            _e7_confirmed.append(_tk); continue
+        _row   = ticker_dfs[_tk].loc[_e7_date]
+        _cl    = float(_row["Close"]); _op = float(_row["Open"])
+        _lo    = float(_row["Low"]);   _vo = float(_row.get("Volume", 0) or 0)
+        _vavg  = float(_row["vol_avg20"]) if not pd.isna(_row.get("vol_avg20", float("nan"))) else 0
+
+        if _lo < _watch["w2_price"] * (1 - E7_STOP_PCT):
+            _e7_confirmed.append(_tk); continue
+        if _cl > _watch["w2_price"] * (1 + E7_ZONE_CANCEL_PCT):
+            _e7_confirmed.append(_tk); continue
+        if _lo <= _watch["w2_price"] * (1 + E7_TOUCH_PCT):
+            _watch["touched"] = True
+
+        _body       = (_cl - _op) / _op if _op > 0 else 0
+        _vol_std    = (_vo >= _vavg * E7_VOL_MULT)       if _vavg > 0 else True
+        _vol_relax  = (_vo >= _vavg * E7_VOL_MULT_RELAX) if _vavg > 0 else True
+        _std_trig   = _body >= E7_BAR_BODY_MIN   and _vol_std
+        _str_candle = _body >= E7_BAR_BODY_STRONG and _vol_relax
+
+        if _watch["touched"] and _cl > _op and _cl > _watch["w2_price"] and (_std_trig or _str_candle):
+            e7_pending[_tk] = {
+                "pivot_price": _watch["w2_price"],
+                "neckline":    _watch["neckline"],
+                "w1_depth":    _watch["w1_depth"],
+                "w1_velocity": _watch["w1_velocity"],
+                "size":        _trade_size(_e7_date),
+            }
+            _e7_confirmed.append(_tk)
+        else:
+            _watch["bars_left"] -= 1
+            if _watch["bars_left"] <= 0:
+                _e7_confirmed.append(_tk)
+    for _tk in _e7_confirmed:
+        e7_watching.pop(_tk, None)
+
+    # ── Exit open positions ────────────────────────────────────────────────
+    _e7_close = []
+    for _tk, _pos in e7_open_pos.items():
+        if _tk not in ticker_dfs or _e7_date not in ticker_dfs[_tk].index:
+            continue
+        _row  = ticker_dfs[_tk].loc[_e7_date]
+        _cl   = float(_row["Close"]); _hi = float(_row["High"]); _lo = float(_row["Low"])
+        _pos["hold_days"] += 1
+        _xr, _xp = None, _cl
+
+        _prev_peak = _pos["peak_price"]
+        _pos["peak_price"] = max(_pos["peak_price"], _hi)
+        _entry = _pos["entry_price"]
+        _stop  = _pos["pivot_price"] * (1 - E7_STOP_PCT)
+
+        if _lo <= _stop:
+            _xr, _xp = "Stop", _stop
+        else:
+            if _cl >= _pos["neckline"]:
+                _pos["trail_active"] = True
+            if _pos["trail_active"]:
+                _trail = _pos["peak_price"] * (1 - E7_TRAIL_PCT)
+                if _lo <= _trail:
+                    _xr, _xp = "Trail Stop", _trail
+            if not _xr:
+                if _cl >= _entry * (1 + E7_STALL_GAIN_PCT):
+                    _pos["hit_gain"] = True
+                if _pos.get("hit_gain"):
+                    if _pos["peak_price"] > _prev_peak:
+                        _pos["bars_no_new_high"] = 0
+                    else:
+                        _pos["bars_no_new_high"] = _pos.get("bars_no_new_high", 0) + 1
+                    if _pos["bars_no_new_high"] >= E7_STALL_BARS:
+                        _stall_fl = _pos["peak_price"] * (1 - E7_STALL_TRAIL_PCT)
+                        if _lo <= _stall_fl:
+                            _xr, _xp = "Stall Trail", _stall_fl
+        if not _xr and _pos["hold_days"] >= E7_STALE_DAYS and _cl < _entry:
+            _xr, _xp = "Stale", _cl
+
+        if _xr:
+            _pnl_pct = (_xp - _entry) / _entry
+            _pnl_dol = _pnl_pct * _pos["size"] - 2 * COMMISSION * _pos["size"]
+            _e7_d    = _pos.get("w1_depth", 0)
+            _e7_v    = _pos.get("w1_velocity", 0)
+            _e7_tier1 = (_e7_d >= 0.20) or (0.010 <= _e7_v <= 0.015)
+            _e7_stars = 6 if _e7_tier1 else 5
+            e7_trades.append({
+                "strategy_type":    "DBLBOT",
+                "ticker":           _tk,
+                "entry_date":       _pos["entry_date"].strftime("%Y-%m-%d"),
+                "entry_price":      round(_entry, 2),
+                "exit_date":        _e7_date.strftime("%Y-%m-%d"),
+                "exit_price":       round(_xp, 2),
+                "exit_reason":      _xr,
+                "hold_days":        _pos["hold_days"],
+                "pnl_pct":          round(_pnl_pct, 4),
+                "pnl_dollar":       round(_pnl_dol, 2),
+                "strategies":       "Double Bottom W2 (E7)",
+                "confidence_stars": _e7_stars,
+                "trade_size":       _pos["size"],
+                "is_5star":         _e7_tier1,
+            })
+            _e7_close.append(_tk)
+    for _tk in _e7_close:
+        del e7_open_pos[_tk]
+
+    # ── Scan for new setups (entry only when SPY > MA50) ──────────────────
+    if not _e7_spy_above50:
+        continue
+
+    for _tk in SW_TICKERS:
+        if _tk not in ticker_dfs or _e7_date not in ticker_dfs[_tk].index:
+            continue
+        if _tk in e7_open_pos or _tk in e7_pending or _tk in e7_watching:
+            continue
+        _df  = ticker_dfs[_tk]
+        _idx = _df.index.get_loc(_e7_date)
+        if _idx < E7_LOOKBACK + E7_ORDER_W1 + 10:
+            continue
+
+        _cl      = float(_df.loc[_e7_date, "Close"])
+        _slice   = _df.iloc[max(0, _idx - E7_LOOKBACK): _idx]
+        _n       = len(_slice)
+        _lows    = _slice["Low"].values
+        _closes  = _slice["Close"].values
+        _highs   = _slice["High"].values
+
+        _mins = argrelextrema(_lows, np.less, order=E7_ORDER_W1)[0]
+        _mins = [i for i in _mins if i <= _n - E7_MIN_SEP - 1]
+
+        for _wi in reversed(_mins):
+            _w1p = float(_lows[_wi])
+            if _cl > _w1p * (1 + E7_ZONE_PCT):   continue
+            if _cl < _w1p * (1 - E7_STOP_PCT):   continue
+
+            _neck = float(_closes[_wi:].max())
+            if _neck < _w1p * (1 + E7_NECKLINE_MIN): continue
+
+            _pre_hi = _highs[max(0, _wi - E7_DEPTH_WINDOW): _wi]
+            if len(_pre_hi) == 0: continue
+            _hi_idx  = int(np.argmax(_pre_hi))
+            _pr_hi   = float(_pre_hi[_hi_idx])
+            _depth   = _pr_hi / _w1p - 1
+            _bars_dw = max(1, len(_pre_hi) - _hi_idx)
+            _vel     = _depth / _bars_dw
+
+            if _depth < E7_DEPTH_MIN:                        continue
+            if _vel < E7_VELOCITY_MIN or _vel > E7_VELOCITY_MAX: continue
+
+            _w1_date = _slice.index[_wi]
+            _key = (_tk, _w1_date)
+            if _key in e7_entered: continue
+
+            e7_entered.add(_key)
+            e7_watching[_tk] = {
+                "w2_price":   _w1p,
+                "neckline":   _neck,
+                "bars_left":  E7_CONFIRM_BARS,
+                "key":        _key,
+                "touched":    False,
+                "w1_depth":   _depth,
+                "w1_velocity": _vel,
+            }
+            break
+
+all_trades.extend(e7_trades)
+print(f"  Engine 7 complete: {len(e7_trades)} trades\n")
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # COMBINED RESULTS
 # ═══════════════════════════════════════════════════════════════════════════════
 if not all_trades:
@@ -1360,6 +1600,7 @@ df_mo  = df_all[df_all["strategy_type"] == "MOMENTUM"]
 df_rg  = df_all[df_all["strategy_type"] == "REGIME"]
 df_e5  = df_all[df_all["strategy_type"] == "SECTOR"]
 df_e6  = df_all[df_all["strategy_type"] == "CHOP"]
+df_e7  = df_all[df_all["strategy_type"] == "DBLBOT"]
 
 def _stats(df):
     if len(df) == 0:
@@ -1373,7 +1614,7 @@ def _stats(df):
         "avg_hold": df["hold_days"].mean(),
     }
 
-cs, ss, xs, ls, rs, e5s, e6s = _stats(df_all), _stats(df_sw), _stats(df_ix), _stats(df_lv), _stats(df_rg), _stats(df_e5), _stats(df_e6)
+cs, ss, xs, ls, rs, e5s, e6s, e7s = _stats(df_all), _stats(df_sw), _stats(df_ix), _stats(df_lv), _stats(df_rg), _stats(df_e5), _stats(df_e6), _stats(df_e7)
 
 # ── Per-star breakdown (across all trades that have confidence_stars) ──────────
 star_stats = {}
@@ -1397,7 +1638,7 @@ for _, t in df_all.iterrows():
     yr = t["entry_date"][:4]
     if yr not in by_year:
         by_year[yr] = {"pnl": 0, "trades": 0, "wins": 0,
-                       "sw_pnl": 0, "ix_pnl": 0, "lv_pnl": 0, "rg_pnl": 0, "e5_pnl": 0, "e6_pnl": 0,
+                       "sw_pnl": 0, "ix_pnl": 0, "lv_pnl": 0, "rg_pnl": 0, "e5_pnl": 0, "e6_pnl": 0, "e7_pnl": 0,
                        "t1_pnl": 0, "t1_trades": 0, "t1_wins": 0,
                        "t2_pnl": 0, "t2_trades": 0, "t2_wins": 0}
     by_year[yr]["pnl"] += t["pnl_dollar"]
@@ -1409,6 +1650,7 @@ for _, t in df_all.iterrows():
     elif t["strategy_type"] == "REGIME":    by_year[yr]["rg_pnl"] += t["pnl_dollar"]
     elif t["strategy_type"] == "SECTOR":    by_year[yr]["e5_pnl"] += t["pnl_dollar"]
     elif t["strategy_type"] == "CHOP":      by_year[yr]["e6_pnl"] += t["pnl_dollar"]
+    elif t["strategy_type"] == "DBLBOT":    by_year[yr]["e7_pnl"] += t["pnl_dollar"]
     _t = _infer_tier(t)
     if _t == 1:
         by_year[yr]["t1_pnl"] += t["pnl_dollar"]
@@ -1429,7 +1671,7 @@ for yr in sorted(by_year.keys()):
     sim_rows.append({
         "year": yr, "size": size, "trades": yd["trades"], "wins": yd["wins"], "yr_pnl": yd["pnl"],
         "sw_pnl": yd["sw_pnl"], "ix_pnl": yd["ix_pnl"], "lv_pnl": yd["lv_pnl"], "rg_pnl": yd["rg_pnl"],
-        "e5_pnl": yd["e5_pnl"], "e6_pnl": yd["e6_pnl"],
+        "e5_pnl": yd["e5_pnl"], "e6_pnl": yd["e6_pnl"], "e7_pnl": yd["e7_pnl"],
         "balance": balance, "yr_return": yd["pnl"] / prev_bal * 100 if prev_bal > 0 else 0,
     })
 
@@ -1450,10 +1692,10 @@ OUT_FILE = os.path.join(OUT_DIR, f"master_backtest_{START_DATE}_{END_DATE}_{RUN_
 
 lines = [
     f"{'='*100}",
-    "  MASTER 6-ENGINE UNIFIED BACKTEST REPORT",
+    "  MASTER 7-ENGINE UNIFIED BACKTEST REPORT",
     f"  Period: {START_DATE}  →  {END_DATE}",
     f"{'-'*100}",
-    f"  Total Trades    : {cs['trades']}  (SWING: {ss['trades']} | INDEX: {xs['trades']} | LEVERAGED: {ls['trades']} | REGIME: {rs['trades']} | SECTOR: {e5s['trades']} | CHOP E6: {e6s['trades']})",
+    f"  Total Trades    : {cs['trades']}  (SWING: {ss['trades']} | INDEX: {xs['trades']} | LEVERAGED: {ls['trades']} | REGIME: {rs['trades']} | SECTOR: {e5s['trades']} | CHOP E6: {e6s['trades']} | DBLBOT E7: {e7s['trades']})",
     f"  Winning Trades  : {cs['wins']}",
     f"  Win Rate        : {cs['win_rate']:.1f}%",
     f"  Total P&L       : ${cs['total_pnl']:+,.2f}",
@@ -1465,14 +1707,15 @@ lines = [
     f"{'='*100}",
     "\nPER-STRATEGY SUMMARY",
     f"{'-'*100}",
-    f"  STRATEGY    TRADES   WIN%    PF        P&L        AVG WIN     AVG LOSS",
-    f"  SWING       {ss['trades']:6d}  {ss['win_rate']:5.1f}%  {ss['pf']:5.2f}    ${ss['total_pnl']:+9,.0f}  ${ss['avg_win']:+9,.0f}  ${ss['avg_loss']:+9,.0f}",
-    f"  INDEX FADE  {xs['trades']:6d}  {xs['win_rate']:5.1f}%  {xs['pf']:5.2f}    ${xs['total_pnl']:+9,.0f}  ${xs['avg_win']:+9,.0f}  ${xs['avg_loss']:+9,.0f}",
-    f"  LEVERAGED   {ls['trades']:6d}  {ls['win_rate']:5.1f}%  {ls['pf']:5.2f}    ${ls['total_pnl']:+9,.0f}  ${ls['avg_win']:+9,.0f}  ${ls['avg_loss']:+9,.0f}",
-    f"  REGIME      {rs['trades']:6d}  {rs['win_rate']:5.1f}%  {rs['pf']:5.2f}    ${rs['total_pnl']:+9,.0f}  ${rs['avg_win']:+9,.0f}  ${rs['avg_loss']:+9,.0f}",
-    f"  SECTOR E5   {e5s['trades']:6d}  {e5s['win_rate']:5.1f}%  {e5s['pf']:5.2f}    ${e5s['total_pnl']:+9,.0f}  ${e5s['avg_win']:+9,.0f}  ${e5s['avg_loss']:+9,.0f}",
-    f"  CHOP E6     {e6s['trades']:6d}  {e6s['win_rate']:5.1f}%  {e6s['pf']:5.2f}    ${e6s['total_pnl']:+9,.0f}  ${e6s['avg_win']:+9,.0f}  ${e6s['avg_loss']:+9,.0f}",
-    f"  COMBINED    {cs['trades']:6d}  {cs['win_rate']:5.1f}%  {cs['pf']:5.2f}    ${cs['total_pnl']:+9,.0f}  ${cs['avg_win']:+9,.0f}  ${cs['avg_loss']:+9,.0f}",
+    f"  STRATEGY       TRADES   WIN%    PF        P&L        AVG WIN     AVG LOSS",
+    f"  SWING          {ss['trades']:6d}  {ss['win_rate']:5.1f}%  {ss['pf']:5.2f}    ${ss['total_pnl']:+9,.0f}  ${ss['avg_win']:+9,.0f}  ${ss['avg_loss']:+9,.0f}",
+    f"  INDEX FADE     {xs['trades']:6d}  {xs['win_rate']:5.1f}%  {xs['pf']:5.2f}    ${xs['total_pnl']:+9,.0f}  ${xs['avg_win']:+9,.0f}  ${xs['avg_loss']:+9,.0f}",
+    f"  LEVERAGED      {ls['trades']:6d}  {ls['win_rate']:5.1f}%  {ls['pf']:5.2f}    ${ls['total_pnl']:+9,.0f}  ${ls['avg_win']:+9,.0f}  ${ls['avg_loss']:+9,.0f}",
+    f"  REGIME         {rs['trades']:6d}  {rs['win_rate']:5.1f}%  {rs['pf']:5.2f}    ${rs['total_pnl']:+9,.0f}  ${rs['avg_win']:+9,.0f}  ${rs['avg_loss']:+9,.0f}",
+    f"  SECTOR E5      {e5s['trades']:6d}  {e5s['win_rate']:5.1f}%  {e5s['pf']:5.2f}    ${e5s['total_pnl']:+9,.0f}  ${e5s['avg_win']:+9,.0f}  ${e5s['avg_loss']:+9,.0f}",
+    f"  CHOP E6        {e6s['trades']:6d}  {e6s['win_rate']:5.1f}%  {e6s['pf']:5.2f}    ${e6s['total_pnl']:+9,.0f}  ${e6s['avg_win']:+9,.0f}  ${e6s['avg_loss']:+9,.0f}",
+    f"  DBLBOT E7      {e7s['trades']:6d}  {e7s['win_rate']:5.1f}%  {e7s['pf']:5.2f}    ${e7s['total_pnl']:+9,.0f}  ${e7s['avg_win']:+9,.0f}  ${e7s['avg_loss']:+9,.0f}",
+    f"  COMBINED       {cs['trades']:6d}  {cs['win_rate']:5.1f}%  {cs['pf']:5.2f}    ${cs['total_pnl']:+9,.0f}  ${cs['avg_win']:+9,.0f}  ${cs['avg_loss']:+9,.0f}",
     f"{'-'*100}",
     "\nBY TIER",
     f"{'-'*100}",
@@ -1512,7 +1755,7 @@ lines += [
     f"{'-'*100}",
     "\nACCOUNT YEARLY GROWTH (Compounding single shared account)",
     f"{'-'*100}",
-    f"  YEAR   TRADES  WIN%    SWING P&L   INDEX P&L   LEVERAGE P&L   REGIME P&L   SECTOR P&L    CHOP P&L    TOTAL P&L    BALANCE      RETURN    SPY RETURN",
+    f"  YEAR   TRADES  WIN%    SWING P&L   INDEX P&L   LEVERAGE P&L   REGIME P&L   SECTOR P&L    CHOP P&L   DBLBOT P&L   TOTAL P&L    BALANCE      RETURN    SPY RETURN",
 ]
 
 for r in sim_rows:
@@ -1525,11 +1768,11 @@ for r in sim_rows:
                 s_c = float(spy_sub.iloc[-1]["Close"])
                 spy_ret = (s_c - s_o) / s_o * 100
         except: pass
-        
+
     wr = r["wins"] / r["trades"] * 100 if r["trades"] > 0 else 0
     lines.append(
         f"  {r['year']:4s}  {r['trades']:6d}  {wr:3.0f}% "
-        f" ${r['sw_pnl']:+9,.0f}  ${r['ix_pnl']:+9,.0f}  ${r['lv_pnl']:+10,.0f}  ${r['rg_pnl']:+10,.0f}  ${r['e5_pnl']:+9,.0f}  ${r['e6_pnl']:+9,.0f}  "
+        f" ${r['sw_pnl']:+9,.0f}  ${r['ix_pnl']:+9,.0f}  ${r['lv_pnl']:+10,.0f}  ${r['rg_pnl']:+10,.0f}  ${r['e5_pnl']:+9,.0f}  ${r['e6_pnl']:+9,.0f}  ${r['e7_pnl']:+9,.0f}  "
         f" ${r['yr_pnl']:+9,.0f}  ${r['balance']:10,.0f}   {r['yr_return']:+6.1f}%   (SPY: {spy_ret:+6.1f}%)"
     )
 

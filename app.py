@@ -1396,7 +1396,7 @@ def show_recommended_view(user_id=""):
             )
             _render_hist_tier(
                 [r for r in hist_rows if int(r["confidence"] or 0) == 4],
-                "TIER 3", "DOUBLE BOTTOM (E7)", "#a8a8c0"
+                "TIER 3", "QUALIFIED", "#a8a8c0"
             )
             _render_hist_tier(
                 [r for r in hist_rows if int(r["confidence"] or 0) == 3],
@@ -1927,7 +1927,7 @@ if auto_run or selected_tickers != cached_tickers:
                 sig = mock_signal(ticker)
             else:
                 from signal_engine import get_signal
-                sig = get_signal(ticker, ind, fund)
+                sig = get_signal(ticker, ind)
                 # SELL signals only apply to open BUY positions — suppress if none exists
                 if sig["signal"] == "SELL":
                     open_buys = [p for p in get_my_open_positions(user_id) if p["ticker"] == ticker]

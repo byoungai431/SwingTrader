@@ -1,7 +1,7 @@
 """
-signal_engine.py — Rule-based signal generator mirroring the SC12 backtest.
+signal_engine.py — Rule-based signal generator mirroring the backtest E1 logic.
 
-Entry logic (no Claude API):
+Entry logic (Engine 1 — Core Swing):
   BUY  : ≥3 of 4 conditions + 2 consecutive green candles + price above MA200
          1. RSI < 40            (oversold depth)
          2. MACD histogram crosses above 0   (momentum reversal)
@@ -12,11 +12,9 @@ Entry logic (no Claude API):
          2. MACD histogram crosses below 0
          3. Death cross (MA50 < MA200)
 
-Confidence tiers:
-  6  (5★ MAX) : RSI < 25 AND price ≤ lower Bollinger Band
-  5  (5★)     : RSI < 25
-  4  (4★)     : ≥3 BUY conditions met + RSI bonus (RSI < 40 in last 3 bars)
-  <4           : dropped by run_daily.py — never saved or notified
+Confidence tiers (matches backtest exactly):
+  6  (5★ MAX) : RSI < 25 — Deep Oversold Blue Diamond
+  4  (4★)     : All other qualifying BUY signals
 
 Engine 2: Index Fade
   BUY  : Base RSI ≥ 80 AND price ≥ BB Upper (both required). RSI ≥ 85 → 5★.
@@ -53,8 +51,6 @@ def get_signal(ticker: str, indicators: dict, fundamentals: dict | None = None) 
     rel_vol     = indicators.get("rel_vol")
     bb_lower    = indicators.get("bb_lower")
     atr14       = indicators.get("atr14")
-    prev_rsi    = indicators.get("prev_rsi")
-    prev2_rsi   = indicators.get("prev2_rsi")
 
     _NO_TRADE = {
         "ticker": ticker, "signal": "NO TRADE", "confidence_stars": 0,
@@ -107,17 +103,10 @@ def get_signal(ticker: str, indicators: dict, fundamentals: dict | None = None) 
         rat = ("No trade: " + "; ".join(reasons)) if reasons else "No trade: conditions not met."
         return {**_NO_TRADE, "rationale": rat}
 
-    # ── Confidence scoring ────────────────────────────────────────────────────
+    # ── Confidence scoring (matches backtest exactly) ─────────────────────────
     if signal == "BUY":
-        if rsi < RSI_5STAR_ENTRY:
-            conf = 6          # 5★ MAX DIAMOND
-        else:
-            # RSI bonus: +1★ if RSI < 40 in any of last 3 bars
-            rsi_recent = [v for v in [rsi, prev_rsi, prev2_rsi] if v is not None]
-            rsi_bonus  = any(r < RSI_ENTRY_MAX for r in rsi_recent)
-            conf = min(buys_count + (1 if rsi_bonus else 0), 4)
+        conf = 6 if rsi < RSI_5STAR_ENTRY else 4
     else:
-        # SELL confidence: count sell conditions (max 4★)
         conf = min(sells_count + 1, 4)
 
     # ── Strategies list ───────────────────────────────────────────────────────
@@ -318,19 +307,13 @@ def get_leveraged_signal(base_ticker: str, indicators: dict) -> dict:
             "target":             "Trail > +35%",
         }
         
-    # 2. 4★ RULES (MA Bounce Trend Following Base Hits)
-    ma20 = indicators.get("ma20")
-    ma50 = indicators.get("ma50")
-    ma200 = indicators.get("ma200")
-    open_p = indicators.get("latest_open")
-    low_p = indicators.get("latest_low")
+    # 5★ Leveraged Breakout (near 20-day high + volume)
     high20 = indicators.get("high20")
-    prev_close = indicators.get("prev_close")
-    
-    if all(v is not None for v in [ma20, ma50, ma200, open_p, low_p, high20]):
+    ma200  = indicators.get("ma200")
+    ma50   = indicators.get("ma50")
+
+    if all(v is not None for v in [high20, ma200, ma50]):
         if close > ma200 and close > ma50:
-            
-            # --- 5★ Leveraged Breakout ---
             if close >= (high20 * 0.99) and rel_vol >= 1.2:
                 strategies.append(f"Momentum Breakout 5★ ({base_ticker})")
                 return {
@@ -344,28 +327,6 @@ def get_leveraged_signal(base_ticker: str, indicators: dict) -> dict:
                     "stop_loss":          "-15% Trail",
                     "target":             "Uncapped",
                 }
-            
-            touched_ma20 = (low_p <= ma20)
-            touched_ma50 = (low_p <= ma50)
-            
-            if touched_ma20 or touched_ma50:
-                closed_above_ma20 = (close > ma20) if touched_ma20 else False
-                closed_above_ma50 = (close > ma50) if touched_ma50 else False
-                is_green = (close > open_p) if open_p else (close > prev_close)
-                high_vol = (rel_vol >= 1.0)
-                
-                if (closed_above_ma20 or closed_above_ma50) and is_green and high_vol:
-                    return {
-                        "ticker":             lev_ticker,
-                        "signal":             "BUY",
-                        "confidence_stars":   4,
-                        "strategies_aligned": [f"MA Trend Bounce ({base_ticker})"],
-                        "fundamentals_bonus": False,
-                        "rationale":          f"4★ LEVERAGED BASE HIT: {base_ticker} Trend Bounce. BUY {lev_ticker}. Target +10%, Stop -9%, Max Hold 12 days.",
-                        "entry_zone":         "Market Open",
-                        "stop_loss":          "-9%",
-                        "target":             "+10%",
-                    }
 
     return _NO_TRADE
 
@@ -549,8 +510,8 @@ def get_sector_hunter_signal(ticker: str, sector: str, indicators: dict,
     if not (close > prev_cl and prev_cl > prev2):
         return _NO_TRADE
 
-    # Price proximity to MA20/MA50 (within 5%)
-    if not (close <= ma20 * 1.05 and close >= ma50 * 0.95):
+    # Price proximity to MA20/MA50 — mirrors backtest: must be above 95% of both MAs
+    if close < ma20 * 0.95 or close < ma50 * 0.95:
         return _NO_TRADE
 
     stars = E5_SECTOR_STARS.get(sector, 4)
@@ -967,10 +928,14 @@ def get_pattern_signal(ticker: str, df: "pd.DataFrame", spy_df: "pd.DataFrame") 
 
         stop_price = round(w1_price * (1 - E7_STOP_PCT), 2)
 
+        _tier1 = (w1_depth >= 0.20) or (0.010 <= w1_velocity <= 0.015)
+        _stars = 6 if _tier1 else 5
+        _star_label = "5★" if _stars == 6 else "4★"
+
         return {
             "ticker":             ticker,
             "signal":             "BUY",
-            "confidence_stars":   4,
+            "confidence_stars":   _stars,
             "strategies_aligned": [
                 f"W2 anticipation: W1 support ${w1_price:.2f}, neckline ${neckline:.2f}",
                 f"W1 depth {w1_depth*100:.0f}%, velocity {w1_velocity*100:.2f}%/bar",
@@ -978,7 +943,7 @@ def get_pattern_signal(ticker: str, df: "pd.DataFrame", spy_df: "pd.DataFrame") 
             ],
             "fundamentals_bonus": False,
             "rationale": (
-                f"4★ DOUBLE BOTTOM W2 (E7): {ticker} bouncing off W1 support "
+                f"{_star_label} DOUBLE BOTTOM W2 (E7): {ticker} bouncing off W1 support "
                 f"${w1_price:.2f}. Neckline ${neckline:.2f}. "
                 f"Depth {w1_depth*100:.0f}%, vel {w1_velocity*100:.2f}%/bar. "
                 f"Vol {vol_ratio:.1f}x avg."

@@ -19,7 +19,6 @@ import pandas as pd
 
 from config import WATCHLIST, HISTORY_DAYS, ANTHROPIC_API_KEY, VIX_MAX
 from indicators import compute_indicators
-from fundamentals import fetch_fundamentals
 from signal_engine import (get_signal, get_index_fade_signal, get_leveraged_signal, get_regime_signal,
                            compute_hot_sectors, get_sector_hunter_signal, E5_SECTOR_ETF_MAP,
                            get_chop_signal, E6_CONSEC_LOSS_LIMIT, E6_LOSS_COOLDOWN_DAYS,
@@ -542,7 +541,6 @@ def run():
     results          = {"BUY": [], "SELL": [], "NO TRADE": [], "ERROR": []}
     notify_signals   = []   # collects signal dicts for BUY/SELL to notify at end
     skipped          = 0
-    rsi_filtered     = 0    # stocks skipped due to neutral RSI (40–60)
 
     for ticker in universe:
         # Skip if already processed today
@@ -597,14 +595,9 @@ def run():
                 if sig_e7.get("signal") == "BUY":
                     generated_signals.append(sig_e7)
 
-            # Engine 1: Core Long Swing — Claude AI call; skip neutral RSI (AI rarely signals here)
-            rsi = ind.get("rsi")
-            rsi_neutral = rsi is not None and 40 < float(rsi) < 60
-            if rsi_neutral:
-                rsi_filtered += 1
-            elif ticker not in _rule_etfs:
-                fund = fetch_fundamentals(ticker)
-                generated_signals.append(get_signal(ticker, ind, fund))
+            # Engine 1: Core Long Swing (rule-based, no API)
+            if ticker not in _rule_etfs:
+                generated_signals.append(get_signal(ticker, ind))
 
             if not generated_signals:
                 generated_signals.append({"ticker": ticker, "signal": "NO TRADE", "confidence_stars": 0, "rationale": "No conditions met."})
@@ -714,7 +707,6 @@ def run():
     print(f"\n{'─'*60}")
     print(f"  Universe : {source}")
     print(f"  Skipped  : {skipped} (already run today)")
-    print(f"  Filtered : {rsi_filtered} (RSI 40–60, neutral zone)")
     print(f"  BUY      ({len(results['BUY'])}): {', '.join(results['BUY']) or '—'}")
     print(f"  SELL     ({len(results['SELL'])}): {', '.join(results['SELL']) or '—'}")
     print(f"  ERRORS   ({len(results['ERROR'])}): {', '.join(results['ERROR']) or '—'}")
