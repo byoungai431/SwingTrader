@@ -811,25 +811,39 @@ def get_chop_signal(ticker: str, df: "pd.DataFrame", spy_df: "pd.DataFrame") -> 
     }
 
 
-# ── ENGINE 7: DOUBLE BOTTOM PATTERN ───────────────────────────────────────────
-# Early bounce entry before neckline breakout.
-# SPY > MA200 + stock > MA200 + bounce_count ≥ 2 in last 20 bars.
-E7_MAX_RECENCY_BARS = 25
-E7_VOL_CONFIRM_MULT = 1.2
-E7_TOUCH_WINDOW     = 20
-E7_MAX_STOP_PCT     = 0.12
-E7_ENTRY_STOP_PCT   = 0.07
-E7_HARD_TP_PCT      = 0.15
+# ── ENGINE 7: DOUBLE BOTTOM W2 ANTICIPATION ───────────────────────────────────
+# Detects W1 (first confirmed swing low) via argrelextrema, watches for price
+# to return to the W1 zone, and confirms a bounce on the current bar.
+# Validated: PF 1.79 in-sample (2020–2026), PF 1.75 out-of-sample (2015–2020).
+E7_LOOKBACK        = 150
+E7_ORDER_W1        = 10
+E7_MIN_SEP         = 15
+E7_ZONE_PCT        = 0.05
+E7_CANCEL_PCT      = 0.06
+E7_TOUCH_PCT       = 0.01
+E7_TOUCH_WINDOW    = 5
+E7_NECKLINE_MIN    = 0.03
+E7_DEPTH_WINDOW    = 30
+E7_DEPTH_MIN       = 0.05
+E7_VELOCITY_MIN    = 0.005
+E7_VELOCITY_MAX    = 0.015
+E7_BAR_BODY_MIN    = 0.006
+E7_BAR_BODY_STRONG = 0.010
+E7_VOL_MULT        = 1.5
+E7_VOL_MULT_RELAX  = 1.2
+E7_STOP_PCT        = 0.06
 
 
 def get_pattern_signal(ticker: str, df: "pd.DataFrame", spy_df: "pd.DataFrame") -> dict:
     """
-    Engine 7: Double Bottom early bounce entry.
-    Mirrors backtest_combined.py PATTERN strategy logic.
-    Requires full OHLCV DataFrame (1y history) for both ticker and SPY.
+    Engine 7: Double Bottom W2 Anticipation.
+    Detects W1 via argrelextrema(order=10), then checks if the current bar
+    is a confirming bounce while price is still in the W1 zone.
+    Requires full OHLCV DataFrame (>=200 bars) for both ticker and SPY.
     """
+    import numpy as np
     import pandas as pd
-    from patterns import detect_double_bottom
+    from scipy.signal import argrelextrema
 
     _NO_TRADE = {
         "ticker": ticker, "signal": "NO TRADE", "confidence_stars": 0,
@@ -838,110 +852,140 @@ def get_pattern_signal(ticker: str, df: "pd.DataFrame", spy_df: "pd.DataFrame") 
         "entry_zone": None, "stop_loss": None, "target": None,
     }
 
-    if df is None or len(df) < 210:
+    if df is None or len(df) < 200:
         return _NO_TRADE
-    if spy_df is None or len(spy_df) < 210:
-        return _NO_TRADE
-
-    # SPY bull regime (SPY close > MA200)
-    spy_close = float(spy_df["Close"].dropna().iloc[-1])
-    spy_ma200 = spy_df["Close"].rolling(200).mean().dropna()
-    if len(spy_ma200) == 0 or spy_close <= float(spy_ma200.iloc[-1]):
+    if spy_df is None or len(spy_df) < 55:
         return _NO_TRADE
 
-    # Stock must be above MA200
-    close_s   = df["Close"].dropna()
-    if len(close_s) < 210:
+    # SPY regime: SPY close > MA50
+    spy_close_s = spy_df["Close"].squeeze().dropna()
+    if len(spy_close_s) < 55:
         return _NO_TRADE
-    ma200_val = float(close_s.rolling(200).mean().iloc[-1])
+    spy_ma50_val = float(spy_close_s.rolling(50).mean().iloc[-1])
+    if pd.isna(spy_ma50_val) or float(spy_close_s.iloc[-1]) <= spy_ma50_val:
+        return _NO_TRADE
+
+    # Build aligned OHLCV series (squeeze handles MultiIndex columns from yfinance)
+    try:
+        close_s = df["Close"].squeeze().dropna()
+        open_s  = df["Open"].squeeze().reindex(close_s.index)
+        low_s   = df["Low"].squeeze().reindex(close_s.index)
+        high_s  = df["High"].squeeze().reindex(close_s.index)
+        vol_s   = df["Volume"].squeeze().reindex(close_s.index).fillna(0) if "Volume" in df.columns \
+                  else pd.Series(0.0, index=close_s.index)
+    except Exception:
+        return _NO_TRADE
+
+    if len(close_s) < 200:
+        return _NO_TRADE
+
+    # Current (confirming) bar
     cur_close = float(close_s.iloc[-1])
-    if pd.isna(ma200_val) or cur_close <= ma200_val:
-        return _NO_TRADE
-
-    # Today's bar data
-    open_s    = df["Open"].reindex(close_s.index)
-    low_s     = df["Low"].reindex(close_s.index)
-    vol_s     = df["Volume"].reindex(close_s.index)
     cur_open  = float(open_s.iloc[-1])
-    vol_today = float(vol_s.iloc[-1])
+    cur_low   = float(low_s.iloc[-1])
+    cur_vol   = float(vol_s.iloc[-1])
     vol_avg20 = float(vol_s.rolling(20).mean().iloc[-1])
 
-    is_green = cur_close > cur_open
-    vol_ok   = vol_avg20 > 0 and vol_today >= vol_avg20 * E7_VOL_CONFIRM_MULT
-
-    if not (is_green and vol_ok):
+    if pd.isna(cur_close) or pd.isna(cur_open):
         return _NO_TRADE
 
-    # Detect double bottom patterns (exclude today so detection is forward-clean)
-    try:
-        results = detect_double_bottom(df.iloc[:-1])
-    except Exception:
-        results = []
+    # Lookback window — exclude current bar so argrelextrema isn't biased by today
+    lb_close = close_s.iloc[-(E7_LOOKBACK + 1):-1]
+    lb_low   = low_s.iloc[-(E7_LOOKBACK + 1):-1]
+    lb_high  = high_s.iloc[-(E7_LOOKBACK + 1):-1]
+    n = len(lb_close)
+    if n < E7_ORDER_W1 * 2 + E7_MIN_SEP + 5:
+        return _NO_TRADE
 
-    for r in results:
-        if r.get("recency_bars", 999) > E7_MAX_RECENCY_BARS:
-            continue
-        if r.get("confirmed"):
-            continue
-        neckline     = r["neckline"]
-        low1_y       = r["low1_y"]
-        low2_y       = r["low2_y"]
-        avg_low      = r["avg_low"]
-        bounce_level = low1_y
+    lows_arr  = lb_low.values
+    close_arr = lb_close.values
+    highs_arr = lb_high.values
 
-        # Quality: 2nd low >= 1st low, pattern depth >= 7%
-        if low2_y < low1_y * 0.995:
-            continue
-        if (neckline - avg_low) / neckline < 0.07:
-            continue
+    # Find confirmed local minima
+    min_idxs = argrelextrema(lows_arr, np.less, order=E7_ORDER_W1)[0]
+    min_idxs = [i for i in min_idxs if i <= n - E7_MIN_SEP - 1]
+    if len(min_idxs) == 0:
+        return _NO_TRADE
 
-        struct_stop = round(bounce_level * 0.98, 2)
-        if (bounce_level - struct_stop) / bounce_level > E7_MAX_STOP_PCT:
-            continue
+    for w1_local_idx in reversed(min_idxs):
+        w1_price = float(lows_arr[w1_local_idx])
 
-        # Entry gate: close >= 3% above support, >= 3% below neckline
-        if cur_close < bounce_level * 1.03:
-            continue
-        if cur_close >= neckline * 0.97:
-            continue
+        if cur_close > w1_price * (1 + E7_ZONE_PCT):
+            continue    # price not in W1 zone
+        if cur_close < w1_price * (1 - E7_CANCEL_PCT):
+            continue    # support broken
 
-        # Count bounces in last TOUCH_WINDOW bars
-        n = len(close_s)
-        lookback_start = max(0, n - E7_TOUCH_WINDOW - 1)
-        bounce_count = 0
-        for i in range(lookback_start, n - 1):  # exclude today
-            row_low   = float(low_s.iloc[i])
-            row_close = float(close_s.iloc[i])
-            if row_low <= bounce_level * 1.02 and row_close > bounce_level:
-                bounce_count += 1
+        # Neckline: highest close from W1 onward in lookback
+        neckline = float(close_arr[w1_local_idx:].max())
+        if neckline < w1_price * (1 + E7_NECKLINE_MIN):
+            continue    # no meaningful recovery
+        if cur_close > neckline:
+            continue    # already through target — too late
 
-        if bounce_count < 2:
+        # W1 depth from prior high
+        pre_start    = max(0, w1_local_idx - E7_DEPTH_WINDOW)
+        pre_highs    = highs_arr[pre_start: w1_local_idx]
+        if len(pre_highs) == 0:
+            continue
+        high_idx     = int(np.argmax(pre_highs))
+        prior_high   = float(pre_highs[high_idx])
+        if prior_high <= w1_price:
+            continue
+        w1_depth     = prior_high / w1_price - 1
+        if w1_depth < E7_DEPTH_MIN:
             continue
 
-        # Valid pattern — generate signal
-        stop_price = round(max(struct_stop, cur_close * (1 - E7_ENTRY_STOP_PCT)), 2)
-        tp_price   = round(cur_close * (1 + E7_HARD_TP_PCT), 2)
-        vol_ratio  = vol_today / vol_avg20 if vol_avg20 > 0 else 0
+        # W1 velocity
+        bars_from_high = max(1, len(pre_highs) - high_idx)
+        w1_velocity    = w1_depth / bars_from_high
+        if w1_velocity < E7_VELOCITY_MIN or w1_velocity > E7_VELOCITY_MAX:
+            continue
+
+        # Touch check: last TOUCH_WINDOW bars of lookback + current bar
+        touch_lows = list(lb_low.iloc[-E7_TOUCH_WINDOW:].values) + [cur_low]
+        if not any(l <= w1_price * (1 + E7_TOUCH_PCT) for l in touch_lows):
+            continue
+
+        # Confirming bar must be green and close above W1
+        if cur_close <= cur_open or cur_close <= w1_price:
+            continue
+
+        bar_body = (cur_close - cur_open) / cur_open if cur_open > 0 else 0.0
+        if vol_avg20 > 0:
+            vol_ratio        = cur_vol / vol_avg20
+            above_vol_std    = vol_ratio >= E7_VOL_MULT
+            above_vol_relax  = vol_ratio >= E7_VOL_MULT_RELAX
+        else:
+            vol_ratio = 0.0
+            above_vol_std = above_vol_relax = True
+
+        standard_trigger = bar_body >= E7_BAR_BODY_MIN   and above_vol_std
+        strong_candle    = bar_body >= E7_BAR_BODY_STRONG and above_vol_relax
+
+        if not (standard_trigger or strong_candle):
+            continue
+
+        stop_price = round(w1_price * (1 - E7_STOP_PCT), 2)
 
         return {
             "ticker":             ticker,
             "signal":             "BUY",
             "confidence_stars":   4,
             "strategies_aligned": [
-                f"Double Bottom (E7): support ${bounce_level:.2f}, neckline ${neckline:.2f}",
-                f"Bounce count {bounce_count} in last {E7_TOUCH_WINDOW} bars",
-                f"Vol {vol_ratio:.1f}x avg, green bar, SPY + stock above MA200",
+                f"W2 anticipation: W1 support ${w1_price:.2f}, neckline ${neckline:.2f}",
+                f"W1 depth {w1_depth*100:.0f}%, velocity {w1_velocity*100:.2f}%/bar",
+                f"Vol {vol_ratio:.1f}x avg, green bar, SPY above MA50",
             ],
             "fundamentals_bonus": False,
             "rationale": (
-                f"4★ DOUBLE BOTTOM PATTERN E7: {ticker} bouncing off support ${bounce_level:.2f} "
-                f"({bounce_count} confirmed touches). Neckline ${neckline:.2f}. "
-                f"Entry ${cur_close:.2f}, Stop -7% (${stop_price:.2f}), "
-                f"Target +15% (${tp_price:.2f}), Max Hold 20d, Stale Cut 14d."
+                f"4★ DOUBLE BOTTOM W2 (E7): {ticker} bouncing off W1 support "
+                f"${w1_price:.2f}. Neckline ${neckline:.2f}. "
+                f"Depth {w1_depth*100:.0f}%, vel {w1_velocity*100:.2f}%/bar. "
+                f"Vol {vol_ratio:.1f}x avg."
             ),
             "entry_zone": f"${cur_close:.2f}",
             "stop_loss":  f"${stop_price:.2f}",
-            "target":     f"${tp_price:.2f}",
+            "target":     f"${neckline:.2f}",
         }
 
     return _NO_TRADE

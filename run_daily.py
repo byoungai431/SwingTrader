@@ -304,7 +304,7 @@ def _detect_engine(rationale: str) -> str:
     r = (rationale or "").lower()
     if "range reversion e6" in r:
         return "E6"
-    if "double bottom pattern e7" in r:
+    if "double bottom" in r and "e7" in r:
         return "E7"
     if "sector hunter" in r:
         return "E5"
@@ -330,7 +330,7 @@ _ENGINE_PARAMS = {
     "E4": {"trail_trigger": 0.17, "trail_distance": 0.10, "max_hold": 90, "max_hold_5star": 90, "stale_cut": None, "stale_unconditional": False},
     "E5": {"trail_trigger": 0.08, "trail_distance": 0.04, "max_hold": 30, "max_hold_5star": 30, "stale_cut": 15,  "stale_unconditional": False},
     "E6": {"trail_trigger": 0.08, "trail_distance": 0.04, "max_hold": 25, "max_hold_5star": 25, "stale_cut": 12,  "stale_unconditional": True},
-    "E7": {"trail_trigger": 0.06, "trail_distance": 0.03, "max_hold": 20, "max_hold_5star": 20, "stale_cut": 14,  "stale_unconditional": False},
+    "E7": {"trail_trigger": 0.07, "trail_distance": 0.03, "max_hold": 45, "max_hold_5star": 45, "stale_cut": 35,  "stale_unconditional": False},
 }
 
 
