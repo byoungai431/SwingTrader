@@ -672,6 +672,62 @@ def _parse_level(s):
         return None
 
 
+# ── Lightweight W1+neckline detector for chart annotations ────────────────────
+def _detect_w1_zone(df):
+    """Find the most recent W1 + neckline without strict E7 filters.
+    Used to paint the predictive W2 zone on any stock chart.
+    Returns a minimal setup dict or None."""
+    try:
+        import numpy as np
+        import pandas as pd
+        from scipy.signal import argrelextrema
+
+        close_s = df["Close"].squeeze().dropna()
+        low_s   = df["Low"].squeeze().dropna()
+        if len(close_s) < 60:
+            return None
+
+        lb_close = close_s.iloc[-151:-1]
+        lb_low   = low_s.reindex(lb_close.index)
+        n        = len(lb_close)
+        lows_arr  = lb_low.values
+        close_arr = lb_close.values
+
+        min_idxs = argrelextrema(lows_arr, np.less, order=10)[0]
+        min_idxs = [i for i in min_idxs if i <= n - 16]
+
+        for w1_local_idx in reversed(min_idxs):
+            w1_price = float(lows_arr[w1_local_idx])
+
+            # Superseded by a more recent lower local min
+            if any(lows_arr[i] < w1_price for i in min_idxs if i > w1_local_idx):
+                continue
+
+            # W1 must never have been breached after it formed
+            post_lows = lows_arr[w1_local_idx + 1:]
+            if len(post_lows) > 0 and float(post_lows.min()) < w1_price:
+                continue
+
+            # Neckline: highest close from W1 onward — require at least 5% bounce
+            neckline = float(close_arr[w1_local_idx:].max())
+            if neckline < w1_price * 1.05:
+                continue
+
+            cur_close = float(close_s.iloc[-1])
+            zone_top  = round(w1_price * 1.05, 2)
+            in_zone   = (cur_close >= w1_price) and (cur_close <= zone_top)
+
+            return {
+                "w1_price": round(w1_price, 2),
+                "zone_top": zone_top,
+                "neckline": round(neckline, 2),
+                "w1_date":  lb_close.index[w1_local_idx],
+                "in_zone":  in_zone,
+            }
+    except Exception:
+        return None
+
+
 # ── Price chart helper ─────────────────────────────────────────────────────────
 def price_chart(df, sig, ind, e7_setup=None):
     """Candlestick chart (last 90 days) with MA50/MA200 and signal levels."""
@@ -731,7 +787,7 @@ def price_chart(df, sig, ind, e7_setup=None):
     if e7_setup:
         import pandas as pd
         w1_price  = e7_setup["w1_price"]
-        zone_top  = e7_setup["zone_top"]
+        zone_top  = round(w1_price * 1.03, 2)   # 3% visual band (display only)
         neckline  = e7_setup["neckline"]
         w1_date   = e7_setup["w1_date"]
         in_zone   = e7_setup.get("in_zone", False)
@@ -2415,6 +2471,8 @@ for item in results:
             _e7 = get_e7_setup(ticker)
         except Exception:
             _e7 = None
+        if _e7 is None:
+            _e7 = _detect_w1_zone(df)
         st.plotly_chart(price_chart(df, sig, ind, e7_setup=_e7), use_container_width=True, config={"displayModeBar": False})
 
     st.write("")
