@@ -1079,12 +1079,6 @@ def _render_signal_cards(rows, current_prices, user_id=""):
 
 
 def show_charts_watch_view():
-    import plotly.graph_objects as go
-    import pandas as pd
-
-    if "ctw_selected" not in st.session_state:
-        st.session_state.ctw_selected = None
-
     st.markdown(
         '<style>'
         '.ctw-col-hdr{font-size:11px;font-weight:800;letter-spacing:0.18em;text-transform:uppercase;'
@@ -1097,8 +1091,6 @@ def show_charts_watch_view():
         'height:auto !important;min-height:0 !important;}'
         'div[data-testid="column"] .stButton>button:hover{'
         'border-color:rgba(130,110,255,0.7) !important;background:rgba(22,18,50,0.9) !important;}'
-        'div[data-testid="column"] .stButton>button[kind="primary"]{'
-        'border-color:#7c6af7 !important;background:rgba(38,28,76,0.95) !important;}'
         '</style>',
         unsafe_allow_html=True,
     )
@@ -1114,7 +1106,6 @@ def show_charts_watch_view():
 
     if st.button("← Back", key="ctw_back"):
         st.session_state.show_charts_watch = False
-        st.session_state.ctw_selected = None
         st.rerun()
 
     setups = get_e7_watching()
@@ -1124,7 +1115,6 @@ def show_charts_watch_view():
         return
 
     scanned_at  = setups[0].get("scanned_at", "")
-    setup_map   = {s["ticker"]: s for s in setups}
 
     col_inzone  = [s for s in setups if s["in_zone"]]
     col_approach= [s for s in setups if not s["in_zone"] and s["pct_above_zone"] <= 0.05]
@@ -1161,18 +1151,17 @@ def show_charts_watch_view():
         in_z  = s["in_zone"]
         pct   = s["pct_above_zone"]
 
-        t1_tag  = "  ★T1" if tier1 else ""
-        if in_z:
-            status_line = "⚡ IN ZONE"
-        else:
-            status_line = f"{pct*100:.1f}% above zone"
+        t1_tag      = "  ★T1" if tier1 else ""
+        status_line = "⚡ IN ZONE" if in_z else f"{pct*100:.1f}% above zone"
+        label       = f"{tk}{t1_tag}\nW1 ${w1:.2f}  ·  Neck ${neck:.2f}\nNow ${cur:.2f}  ·  {status_line}"
 
-        is_sel   = st.session_state.ctw_selected == tk
-        btn_type = "primary" if is_sel else "secondary"
-        label    = f"{tk}{t1_tag}\nW1 ${w1:.2f}  ·  Neck ${neck:.2f}\nNow ${cur:.2f}  ·  {status_line}"
-
-        if st.button(label, key=f"ctw_{tk}", use_container_width=True, type=btn_type):
-            st.session_state.ctw_selected = None if is_sel else tk
+        if st.button(label, key=f"ctw_{tk}", use_container_width=True):
+            st.session_state.selected_ticker  = tk
+            st.session_state.analyzed         = False
+            st.session_state.show_recommended = False
+            st.session_state.results_tickers  = []
+            st.session_state.auto_run         = True
+            st.session_state.show_charts_watch = False
             st.rerun()
 
     with c1:
@@ -1196,106 +1185,6 @@ def show_charts_watch_view():
         for s in col_watch:
             _card(s)
 
-    # ── Chart panel for selected ticker ─────────────────────────────────────────
-    sel = st.session_state.ctw_selected
-    if not sel or sel not in setup_map:
-        st.markdown(
-            '<div style="text-align:center;padding:40px 0;color:#2a3a5a;font-size:13px;">'
-            'Select a ticker above to view its chart</div>',
-            unsafe_allow_html=True,
-        )
-        return
-
-    s    = setup_map[sel]
-    w1   = s["w1_price"]
-    neck = s["neckline"]
-    ztop = s["zone_top"]
-    cur  = s["cur_close"]
-    dep  = s["depth"]
-    vel  = s["velocity"]
-    t1   = s["tier1"]
-
-    st.markdown('<hr style="border-color:rgba(60,60,100,0.4);margin:20px 0 16px 0;">', unsafe_allow_html=True)
-
-    tier_badge = (
-        '<span style="background:#0e2a40;color:#40E0FF;font-size:11px;font-weight:800;'
-        'padding:2px 9px;border-radius:10px;margin-left:10px;letter-spacing:0.12em;">T1</span>'
-        if t1 else ""
-    )
-    st.markdown(
-        f'<div style="margin-bottom:14px;">'
-        f'<span style="font-size:22px;font-weight:900;color:#c8c8ff;">{sel}</span>{tier_badge}'
-        f'<span style="font-size:12px;color:#6677aa;margin-left:16px;">'
-        f'Depth {dep*100:.0f}%  ·  Vel {vel*100:.2f}%/bar</span>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
-
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("W1 Support",      f"${w1:.2f}")
-    m2.metric("Neckline Target", f"${neck:.2f}")
-    m3.metric("W2 Zone",         f"${w1:.2f} – ${ztop:.2f}")
-    m4.metric("Current Price",   f"${cur:.2f}", delta=f"{((cur/w1)-1)*100:.1f}% above W1")
-
-    # Lazy-load chart data for selected ticker only
-    if "ctw_charts" not in st.session_state or st.session_state.get("ctw_scan_time") != scanned_at:
-        st.session_state.ctw_charts    = {}
-        st.session_state.ctw_scan_time = scanned_at
-
-    charts = st.session_state.ctw_charts
-    if sel not in charts:
-        with st.spinner(f"Loading {sel}..."):
-            try:
-                df_tk   = fetch_price_data(sel)
-                close_s = df_tk["Close"].squeeze().dropna()
-                open_s  = df_tk["Open"].squeeze().reindex(close_s.index)
-                high_s  = df_tk["High"].squeeze().reindex(close_s.index)
-                low_s   = df_tk["Low"].squeeze().reindex(close_s.index)
-                w1_date = pd.Timestamp(s["w1_date"])
-                loc     = close_s.index.get_indexer([w1_date], method="nearest")[0]
-                loc     = max(0, loc - 10)
-                charts[sel] = pd.DataFrame({
-                    "Open":  open_s.iloc[loc:],  "High": high_s.iloc[loc:],
-                    "Low":   low_s.iloc[loc:],   "Close": close_s.iloc[loc:],
-                })
-            except Exception:
-                charts[sel] = None
-        st.session_state.ctw_charts = charts
-
-    df_c = charts.get(sel)
-    if df_c is not None and len(df_c) > 5:
-        fig = go.Figure()
-        fig.add_trace(go.Candlestick(
-            x=df_c.index,
-            open=df_c["Open"], high=df_c["High"],
-            low=df_c["Low"],   close=df_c["Close"],
-            name=sel,
-            increasing_line_color="#40e0b0", increasing_fillcolor="#1a4a3a",
-            decreasing_line_color="#e05050", decreasing_fillcolor="#4a1a1a",
-        ))
-        fig.add_hrect(y0=w1 * 0.994, y1=ztop,
-                      fillcolor="rgba(139,92,246,0.18)", line_width=0)
-        fig.add_hline(y=w1, line_dash="dash", line_color="#f97316", line_width=1.5,
-                      annotation_text=f"W1 ${w1:.2f}", annotation_position="bottom right",
-                      annotation_font_color="#f97316", annotation_font_size=11)
-        fig.add_hline(y=neck, line_dash="dash", line_color="#22c55e", line_width=1.5,
-                      annotation_text=f"Neckline ${neck:.2f}", annotation_position="top right",
-                      annotation_font_color="#22c55e", annotation_font_size=11)
-        fig.add_hline(y=ztop, line_dash="dot", line_color="#9b59b6", line_width=1,
-                      annotation_text="Zone top", annotation_position="top left",
-                      annotation_font_color="#9b59b6", annotation_font_size=10)
-        fig.update_layout(
-            height=400,
-            paper_bgcolor="rgba(5,5,20,0)", plot_bgcolor="rgba(5,5,20,0)",
-            font=dict(color="#8888bb", size=11),
-            xaxis=dict(showgrid=False, rangeslider_visible=False, color="#4a5a7a"),
-            yaxis=dict(showgrid=True, gridcolor="rgba(50,50,80,0.3)", color="#4a5a7a"),
-            margin=dict(l=10, r=90, t=20, b=10),
-            showlegend=False,
-        )
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
-    else:
-        st.warning(f"Chart data unavailable for {sel}.")
 
 
 def show_recommended_view(user_id=""):
