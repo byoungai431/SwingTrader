@@ -793,6 +793,7 @@ E7_BAR_BODY_STRONG = 0.010
 E7_VOL_MULT        = 1.5
 E7_VOL_MULT_RELAX  = 1.2
 E7_STOP_PCT        = 0.06
+E7_W1_MAX_AGE      = 60   # max bars since W1 for watching list (keeps setups fresh)
 
 
 def get_pattern_signal(ticker: str, df: "pd.DataFrame", spy_df: "pd.DataFrame") -> dict:
@@ -1009,6 +1010,10 @@ def scan_e7_watching(ticker: str, df, spy_df):
     min_idxs = [i for i in min_idxs if i <= n - E7_MIN_SEP - 1]
 
     for w1_local_idx in reversed(min_idxs):
+        # Skip W1s that are too old — pattern has had time to play out
+        if (n - 1 - w1_local_idx) > E7_W1_MAX_AGE:
+            continue
+
         w1_price = float(lows_arr[w1_local_idx])
 
         # Neckline = highest close from W1 onward in lookback

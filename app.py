@@ -1089,16 +1089,16 @@ def show_charts_watch_view():
         '<style>'
         '.ctw-col-hdr{font-size:11px;font-weight:800;letter-spacing:0.18em;text-transform:uppercase;'
         'padding:8px 0 10px 0;margin-bottom:4px;border-bottom:1px solid rgba(80,80,120,0.35);}'
-        '.ctw-card{width:100%;text-align:left;background:rgba(18,18,38,0.7);'
-        'border:1px solid rgba(70,70,110,0.4);border-radius:8px;padding:9px 12px;'
-        'margin-bottom:5px;cursor:pointer;transition:border-color 0.15s;}'
-        '.ctw-card:hover{border-color:rgba(140,120,255,0.65);background:rgba(28,24,58,0.85);}'
-        '.ctw-card-sel{border-color:#7c6af7 !important;background:rgba(40,30,80,0.9) !important;}'
-        '.ctw-tk{font-size:14px;font-weight:900;color:#c8c8ff;}'
-        '.ctw-t1{font-size:9px;font-weight:800;color:#40E0FF;background:#0e2a40;'
-        'padding:1px 6px;border-radius:8px;margin-left:6px;letter-spacing:0.1em;}'
-        '.ctw-sub{font-size:11px;color:#5a6a8a;margin-top:2px;}'
-        '.ctw-price{font-size:12px;color:#8888bb;margin-top:1px;}'
+        'div[data-testid="column"] .stButton>button{'
+        'width:100%;text-align:left !important;white-space:pre-wrap !important;'
+        'background:rgba(14,14,32,0.75) !important;border:1px solid rgba(65,65,105,0.5) !important;'
+        'border-radius:8px !important;padding:10px 14px !important;margin-bottom:5px !important;'
+        'color:#c8c8ff !important;font-size:12px !important;line-height:1.55 !important;'
+        'height:auto !important;min-height:0 !important;}'
+        'div[data-testid="column"] .stButton>button:hover{'
+        'border-color:rgba(130,110,255,0.7) !important;background:rgba(22,18,50,0.9) !important;}'
+        'div[data-testid="column"] .stButton>button[kind="primary"]{'
+        'border-color:#7c6af7 !important;background:rgba(38,28,76,0.95) !important;}'
         '</style>',
         unsafe_allow_html=True,
     )
@@ -1161,24 +1161,17 @@ def show_charts_watch_view():
         in_z  = s["in_zone"]
         pct   = s["pct_above_zone"]
 
-        t1_html = '<span class="ctw-t1">T1</span>' if tier1 else ""
+        t1_tag  = "  ★T1" if tier1 else ""
         if in_z:
-            status = '<span style="font-size:10px;font-weight:700;color:#f87171;">⚡ IN ZONE</span>'
+            status_line = "⚡ IN ZONE"
         else:
-            status = f'<span style="font-size:10px;color:#6677aa;">{pct*100:.1f}% above zone</span>'
+            status_line = f"{pct*100:.1f}% above zone"
 
-        is_sel  = st.session_state.ctw_selected == tk
-        sel_cls = "ctw-card-sel" if is_sel else ""
-        st.markdown(
-            f'<div class="ctw-card {sel_cls}">'
-            f'<span class="ctw-tk">{tk}</span>{t1_html}'
-            f'<div class="ctw-sub">W1 ${w1:.2f} &nbsp;·&nbsp; Neck ${neck:.2f}</div>'
-            f'<div class="ctw-price">Now ${cur:.2f} &nbsp;&nbsp;{status}</div>'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
-        if st.button("Select" if not is_sel else "✓ Selected", key=f"ctw_{tk}",
-                     use_container_width=True):
+        is_sel   = st.session_state.ctw_selected == tk
+        btn_type = "primary" if is_sel else "secondary"
+        label    = f"{tk}{t1_tag}\nW1 ${w1:.2f}  ·  Neck ${neck:.2f}\nNow ${cur:.2f}  ·  {status_line}"
+
+        if st.button(label, key=f"ctw_{tk}", use_container_width=True, type=btn_type):
             st.session_state.ctw_selected = None if is_sel else tk
             st.rerun()
 
