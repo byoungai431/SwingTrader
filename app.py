@@ -19,7 +19,7 @@ from history import (save_signal, get_history, dismiss_signal,
                       get_my_position_history, close_my_position, get_conn,
                       get_watchlist, save_watchlist,
                       get_user_settings, save_user_settings,
-                      get_e7_watching)
+                      get_e7_watching, get_e7_setup)
 from config import WATCHLIST, ANTHROPIC_API_KEY
 from notify import send_exit_alert
 from signal_engine import (compute_hot_sectors, get_sector_hunter_signal,
@@ -673,7 +673,7 @@ def _parse_level(s):
 
 
 # ── Price chart helper ─────────────────────────────────────────────────────────
-def price_chart(df, sig, ind):
+def price_chart(df, sig, ind, e7_setup=None):
     """Candlestick chart (last 90 days) with MA50/MA200 and signal levels."""
     chart_df = df.tail(90).copy()
 
@@ -726,6 +726,44 @@ def price_chart(df, sig, ind):
             fig.add_hline(y=target_val, line=dict(color="#39d98a", dash="dot", width=1.5),
                           annotation_text="Target", annotation_font_color="#39d98a",
                           annotation_position="right")
+
+    # E7 double-bottom annotations (when stock is on the watching list)
+    if e7_setup:
+        w1_price  = e7_setup["w1_price"]
+        zone_top  = e7_setup["zone_top"]
+        neckline  = e7_setup["neckline"]
+        w1_date   = e7_setup["w1_date"]
+
+        # W2 anticipation zone — shaded band between W1 and zone_top
+        fig.add_hrect(
+            y0=w1_price, y1=zone_top,
+            fillcolor="rgba(78,205,196,0.08)",
+            line=dict(color="rgba(78,205,196,0.25)", width=1, dash="dot"),
+            layer="below",
+        )
+        # W1 support line
+        fig.add_hline(
+            y=w1_price,
+            line=dict(color="#4ecdc4", dash="dash", width=1.5),
+            annotation_text="W1", annotation_font_color="#4ecdc4",
+            annotation_position="right",
+        )
+        # Neckline / target
+        fig.add_hline(
+            y=neckline,
+            line=dict(color="#4ecdc4", dash="dot", width=1.5),
+            annotation_text="Neckline", annotation_font_color="#4ecdc4",
+            annotation_position="right",
+        )
+        # W1 low marker dot
+        if w1_date in chart_df.index:
+            fig.add_trace(go.Scatter(
+                x=[w1_date], y=[w1_price],
+                mode="markers",
+                marker=dict(color="#4ecdc4", size=10, symbol="circle",
+                            line=dict(color="#ffffff", width=1.5)),
+                name="W1", showlegend=True,
+            ))
 
     fig.update_layout(
         paper_bgcolor="#07071a",
@@ -2343,7 +2381,7 @@ for item in results:
     # ── Price Chart ───────────────────────────────────────────────────────────
     with st.container(border=True):
         st.markdown('<div class="panel-title">📈 &nbsp; Price Chart &nbsp;<span style="font-size:10px;color:#33336a;font-weight:400;">90-day · MA50 · MA200</span></div>', unsafe_allow_html=True)
-        st.plotly_chart(price_chart(df, sig, ind), use_container_width=True, config={"displayModeBar": False})
+        st.plotly_chart(price_chart(df, sig, ind, e7_setup=get_e7_setup(ticker)), use_container_width=True, config={"displayModeBar": False})
 
     st.write("")
 

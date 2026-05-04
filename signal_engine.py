@@ -1029,8 +1029,13 @@ def scan_e7_watching(ticker: str, df, spy_df):
         if cur_close >= neckline:
             continue
 
-        # Support not broken — watching list uses strict check: price must be AT
-        # or above W1 (broken below W1 = invalidated, not "in zone")
+        # W1 support must never have been broken after W1 formed.
+        # If any bar's low after W1 went below W1, the double bottom is invalid.
+        post_w1_lows = lows_arr[w1_local_idx + 1:]
+        if len(post_w1_lows) > 0 and float(post_w1_lows.min()) < w1_price:
+            continue
+
+        # Current price must still be at or above W1
         if cur_close < w1_price:
             continue
 

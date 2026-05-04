@@ -153,6 +153,32 @@ def save_e7_watching(setups: list):
         conn.close()
 
 
+def get_e7_setup(ticker: str) -> dict | None:
+    """Return the E7 watching setup for a single ticker, or None."""
+    init_db()
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT ticker, w1_price, w1_date, neckline, zone_top, cur_close,
+                       depth, velocity, in_zone, pct_above, tier1, scanned_at,
+                       missed_active
+                FROM e7_watching WHERE ticker = %s
+            """, (ticker,))
+            r = cur.fetchone()
+    finally:
+        conn.close()
+    if not r:
+        return None
+    return {
+        "ticker": r[0], "w1_price": r[1], "w1_date": r[2],
+        "neckline": r[3], "zone_top": r[4], "cur_close": r[5],
+        "depth": r[6], "velocity": r[7], "in_zone": bool(r[8]),
+        "pct_above_zone": r[9], "tier1": bool(r[10]), "scanned_at": r[11],
+        "missed_active": bool(r[12]),
+    }
+
+
 def get_e7_watching() -> list[dict]:
     """Return all E7 watching setups sorted by urgency."""
     init_db()
