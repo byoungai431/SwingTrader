@@ -1023,8 +1023,9 @@ def scan_e7_watching(ticker: str, df, spy_df):
         if cur_close >= neckline:
             continue
 
-        # Support not broken
-        if cur_close < w1_price * (1 - E7_CANCEL_PCT):
+        # Support not broken — watching list uses strict check: price must be AT
+        # or above W1 (broken below W1 = invalidated, not "in zone")
+        if cur_close < w1_price:
             continue
 
         # Skip if W2 already played out: price dipped into zone AND had a
@@ -1061,7 +1062,7 @@ def scan_e7_watching(ticker: str, df, spy_df):
         if w1_velocity < E7_VELOCITY_MIN or w1_velocity > E7_VELOCITY_MAX:
             continue
 
-        in_zone        = cur_close <= zone_top
+        in_zone        = (cur_close >= w1_price) and (cur_close <= zone_top)
         pct_above_zone = max(0.0, (cur_close - zone_top) / zone_top)
 
         # Build chart slice: 10 bars before W1 → current bar
