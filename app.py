@@ -1080,6 +1080,28 @@ def _render_signal_cards(rows, current_prices, user_id=""):
 
 def show_charts_watch_view():
     import plotly.graph_objects as go
+    import pandas as pd
+
+    if "ctw_selected" not in st.session_state:
+        st.session_state.ctw_selected = None
+
+    st.markdown(
+        '<style>'
+        '.ctw-col-hdr{font-size:11px;font-weight:800;letter-spacing:0.18em;text-transform:uppercase;'
+        'padding:8px 0 10px 0;margin-bottom:4px;border-bottom:1px solid rgba(80,80,120,0.35);}'
+        '.ctw-card{width:100%;text-align:left;background:rgba(18,18,38,0.7);'
+        'border:1px solid rgba(70,70,110,0.4);border-radius:8px;padding:9px 12px;'
+        'margin-bottom:5px;cursor:pointer;transition:border-color 0.15s;}'
+        '.ctw-card:hover{border-color:rgba(140,120,255,0.65);background:rgba(28,24,58,0.85);}'
+        '.ctw-card-sel{border-color:#7c6af7 !important;background:rgba(40,30,80,0.9) !important;}'
+        '.ctw-tk{font-size:14px;font-weight:900;color:#c8c8ff;}'
+        '.ctw-t1{font-size:9px;font-weight:800;color:#40E0FF;background:#0e2a40;'
+        'padding:1px 6px;border-radius:8px;margin-left:6px;letter-spacing:0.1em;}'
+        '.ctw-sub{font-size:11px;color:#5a6a8a;margin-top:2px;}'
+        '.ctw-price{font-size:12px;color:#8888bb;margin-top:1px;}'
+        '</style>',
+        unsafe_allow_html=True,
+    )
 
     st.markdown(
         '<div style="text-align:center;padding:28px 0 8px 0;">'
@@ -1092,6 +1114,7 @@ def show_charts_watch_view():
 
     if st.button("← Back", key="ctw_back"):
         st.session_state.show_charts_watch = False
+        st.session_state.ctw_selected = None
         st.rerun()
 
     setups = get_e7_watching()
@@ -1100,136 +1123,186 @@ def show_charts_watch_view():
         st.info("No E7 setups in database yet. Run the daily scan to populate this page.")
         return
 
-    scanned_at = setups[0].get("scanned_at", "")
-    in_zone  = [s for s in setups if s["in_zone"]]
-    watching = [s for s in setups if not s["in_zone"]]
+    scanned_at  = setups[0].get("scanned_at", "")
+    setup_map   = {s["ticker"]: s for s in setups}
+
+    col_inzone  = [s for s in setups if s["in_zone"]]
+    col_approach= [s for s in setups if not s["in_zone"] and s["pct_above_zone"] <= 0.05]
+    col_watch   = [s for s in setups if not s["in_zone"] and s["pct_above_zone"] >  0.05]
 
     st.markdown(
-        f'<div style="text-align:center;padding:6px 0 18px 0;font-size:13px;color:#8888bb;">'
-        f'<b style="color:#c8c8ff;">{len(setups)}</b> active setups — '
-        f'<b style="color:#f87171;">{len(in_zone)}</b> in W2 zone · '
-        f'<b style="color:#f9c846;">{len(watching)}</b> approaching'
-        f'<span style="font-size:11px;color:#3a4a6a;margin-left:14px;">Updated {scanned_at}</span>'
+        f'<div style="padding:4px 0 16px 0;font-size:12px;color:#5a6a8a;">'
+        f'<b style="color:#c8c8ff;">{len(setups)}</b> setups &nbsp;·&nbsp; '
+        f'<span style="color:#f87171;">{len(col_inzone)} in zone</span> &nbsp;·&nbsp; '
+        f'<span style="color:#f9c846;">{len(col_approach)} approaching</span> &nbsp;·&nbsp; '
+        f'<span style="color:#7777aa;">{len(col_watch)} watching</span>'
+        f'<span style="float:right;font-size:10px;color:#3a4a6a;">Updated {scanned_at}</span>'
         f'</div>',
         unsafe_allow_html=True,
     )
 
-    # Batch-fetch chart data for all tickers (fast — one yfinance call per ticker)
+    # ── Three status columns ────────────────────────────────────────────────────
+    c1, c2, c3 = st.columns(3)
+
+    def _col_header(label, count, color):
+        st.markdown(
+            f'<div class="ctw-col-hdr" style="color:{color};">'
+            f'{label} &nbsp;<span style="background:rgba(0,0,0,0.35);color:#8888bb;'
+            f'font-size:10px;padding:1px 7px;border-radius:10px;">{count}</span></div>',
+            unsafe_allow_html=True,
+        )
+
+    def _card(s):
+        tk    = s["ticker"]
+        w1    = s["w1_price"]
+        neck  = s["neckline"]
+        cur   = s["cur_close"]
+        tier1 = s["tier1"]
+        in_z  = s["in_zone"]
+        pct   = s["pct_above_zone"]
+
+        t1_html = '<span class="ctw-t1">T1</span>' if tier1 else ""
+        if in_z:
+            status = '<span style="font-size:10px;font-weight:700;color:#f87171;">⚡ IN ZONE</span>'
+        else:
+            status = f'<span style="font-size:10px;color:#6677aa;">{pct*100:.1f}% above zone</span>'
+
+        is_sel  = st.session_state.ctw_selected == tk
+        sel_cls = "ctw-card-sel" if is_sel else ""
+        st.markdown(
+            f'<div class="ctw-card {sel_cls}">'
+            f'<span class="ctw-tk">{tk}</span>{t1_html}'
+            f'<div class="ctw-sub">W1 ${w1:.2f} &nbsp;·&nbsp; Neck ${neck:.2f}</div>'
+            f'<div class="ctw-price">Now ${cur:.2f} &nbsp;&nbsp;{status}</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        if st.button("Select" if not is_sel else "✓ Selected", key=f"ctw_{tk}",
+                     use_container_width=True):
+            st.session_state.ctw_selected = None if is_sel else tk
+            st.rerun()
+
+    with c1:
+        _col_header("⚡  In Zone", len(col_inzone), "#f87171")
+        for s in col_inzone:
+            _card(s)
+        if not col_inzone:
+            st.markdown('<div style="font-size:12px;color:#3a4a5a;padding:12px 0;">None today</div>',
+                        unsafe_allow_html=True)
+
+    with c2:
+        _col_header("↘  Approaching", len(col_approach), "#f9c846")
+        for s in col_approach:
+            _card(s)
+        if not col_approach:
+            st.markdown('<div style="font-size:12px;color:#3a4a5a;padding:12px 0;">None today</div>',
+                        unsafe_allow_html=True)
+
+    with c3:
+        _col_header("👀  Watching", len(col_watch), "#7777aa")
+        for s in col_watch:
+            _card(s)
+
+    # ── Chart panel for selected ticker ─────────────────────────────────────────
+    sel = st.session_state.ctw_selected
+    if not sel or sel not in setup_map:
+        st.markdown(
+            '<div style="text-align:center;padding:40px 0;color:#2a3a5a;font-size:13px;">'
+            'Select a ticker above to view its chart</div>',
+            unsafe_allow_html=True,
+        )
+        return
+
+    s    = setup_map[sel]
+    w1   = s["w1_price"]
+    neck = s["neckline"]
+    ztop = s["zone_top"]
+    cur  = s["cur_close"]
+    dep  = s["depth"]
+    vel  = s["velocity"]
+    t1   = s["tier1"]
+
+    st.markdown('<hr style="border-color:rgba(60,60,100,0.4);margin:20px 0 16px 0;">', unsafe_allow_html=True)
+
+    tier_badge = (
+        '<span style="background:#0e2a40;color:#40E0FF;font-size:11px;font-weight:800;'
+        'padding:2px 9px;border-radius:10px;margin-left:10px;letter-spacing:0.12em;">T1</span>'
+        if t1 else ""
+    )
+    st.markdown(
+        f'<div style="margin-bottom:14px;">'
+        f'<span style="font-size:22px;font-weight:900;color:#c8c8ff;">{sel}</span>{tier_badge}'
+        f'<span style="font-size:12px;color:#6677aa;margin-left:16px;">'
+        f'Depth {dep*100:.0f}%  ·  Vel {vel*100:.2f}%/bar</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("W1 Support",      f"${w1:.2f}")
+    m2.metric("Neckline Target", f"${neck:.2f}")
+    m3.metric("W2 Zone",         f"${w1:.2f} – ${ztop:.2f}")
+    m4.metric("Current Price",   f"${cur:.2f}", delta=f"{((cur/w1)-1)*100:.1f}% above W1")
+
+    # Lazy-load chart data for selected ticker only
     if "ctw_charts" not in st.session_state or st.session_state.get("ctw_scan_time") != scanned_at:
-        charts = {}
-        for s in setups:
+        st.session_state.ctw_charts    = {}
+        st.session_state.ctw_scan_time = scanned_at
+
+    charts = st.session_state.ctw_charts
+    if sel not in charts:
+        with st.spinner(f"Loading {sel}..."):
             try:
-                df_tk   = fetch_price_data(s["ticker"])
+                df_tk   = fetch_price_data(sel)
                 close_s = df_tk["Close"].squeeze().dropna()
                 open_s  = df_tk["Open"].squeeze().reindex(close_s.index)
                 high_s  = df_tk["High"].squeeze().reindex(close_s.index)
                 low_s   = df_tk["Low"].squeeze().reindex(close_s.index)
-                import pandas as pd
                 w1_date = pd.Timestamp(s["w1_date"])
                 loc     = close_s.index.get_indexer([w1_date], method="nearest")[0]
                 loc     = max(0, loc - 10)
-                charts[s["ticker"]] = pd.DataFrame({
-                    "Open": open_s.iloc[loc:], "High": high_s.iloc[loc:],
-                    "Low":  low_s.iloc[loc:],  "Close": close_s.iloc[loc:],
+                charts[sel] = pd.DataFrame({
+                    "Open":  open_s.iloc[loc:],  "High": high_s.iloc[loc:],
+                    "Low":   low_s.iloc[loc:],   "Close": close_s.iloc[loc:],
                 })
             except Exception:
-                pass
-        st.session_state.ctw_charts    = charts
-        st.session_state.ctw_scan_time = scanned_at
+                charts[sel] = None
+        st.session_state.ctw_charts = charts
 
-    charts = st.session_state.ctw_charts
-
-    def _render_setup(s):
-        tk     = s["ticker"]
-        w1     = s["w1_price"]
-        neck   = s["neckline"]
-        ztop   = s["zone_top"]
-        cur    = s["cur_close"]
-        depth  = s["depth"]
-        vel    = s["velocity"]
-        in_z   = s["in_zone"]
-        pct_aw = s["pct_above_zone"]
-        tier1  = s["tier1"]
-        df_c   = charts.get(tk)
-
-        tier_badge = (
-            '<span style="background:#1a3a5c;color:#40E0FF;font-size:10px;font-weight:800;'
-            'padding:2px 8px;border-radius:10px;margin-left:8px;letter-spacing:0.12em;">T1</span>'
-            if tier1 else ""
+    df_c = charts.get(sel)
+    if df_c is not None and len(df_c) > 5:
+        fig = go.Figure()
+        fig.add_trace(go.Candlestick(
+            x=df_c.index,
+            open=df_c["Open"], high=df_c["High"],
+            low=df_c["Low"],   close=df_c["Close"],
+            name=sel,
+            increasing_line_color="#40e0b0", increasing_fillcolor="#1a4a3a",
+            decreasing_line_color="#e05050", decreasing_fillcolor="#4a1a1a",
+        ))
+        fig.add_hrect(y0=w1 * 0.994, y1=ztop,
+                      fillcolor="rgba(139,92,246,0.18)", line_width=0)
+        fig.add_hline(y=w1, line_dash="dash", line_color="#f97316", line_width=1.5,
+                      annotation_text=f"W1 ${w1:.2f}", annotation_position="bottom right",
+                      annotation_font_color="#f97316", annotation_font_size=11)
+        fig.add_hline(y=neck, line_dash="dash", line_color="#22c55e", line_width=1.5,
+                      annotation_text=f"Neckline ${neck:.2f}", annotation_position="top right",
+                      annotation_font_color="#22c55e", annotation_font_size=11)
+        fig.add_hline(y=ztop, line_dash="dot", line_color="#9b59b6", line_width=1,
+                      annotation_text="Zone top", annotation_position="top left",
+                      annotation_font_color="#9b59b6", annotation_font_size=10)
+        fig.update_layout(
+            height=400,
+            paper_bgcolor="rgba(5,5,20,0)", plot_bgcolor="rgba(5,5,20,0)",
+            font=dict(color="#8888bb", size=11),
+            xaxis=dict(showgrid=False, rangeslider_visible=False, color="#4a5a7a"),
+            yaxis=dict(showgrid=True, gridcolor="rgba(50,50,80,0.3)", color="#4a5a7a"),
+            margin=dict(l=10, r=90, t=20, b=10),
+            showlegend=False,
         )
-        zone_badge = (
-            '<span style="background:#4a1a1a;color:#f87171;font-size:10px;font-weight:800;'
-            'padding:2px 8px;border-radius:10px;margin-left:8px;">⚡ IN ZONE</span>'
-            if in_z else
-            f'<span style="background:#2a2a1a;color:#f9c846;font-size:10px;font-weight:700;'
-            f'padding:2px 8px;border-radius:10px;margin-left:8px;">{pct_aw*100:.1f}% above zone</span>'
-        )
-
-        with st.expander(f"{tk}  —  W1 ${w1:.2f}  ·  Neckline ${neck:.2f}  ·  Now ${cur:.2f}", expanded=in_z):
-            st.markdown(
-                f'<div style="margin-bottom:10px;">'
-                f'<span style="font-size:18px;font-weight:900;color:#c8c8ff;">{tk}</span>'
-                f'{tier_badge}{zone_badge}'
-                f'<span style="font-size:12px;color:#6677aa;margin-left:14px;">'
-                f'Depth {depth*100:.0f}%  ·  Vel {vel*100:.2f}%/bar</span>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("W1 Support",     f"${w1:.2f}")
-            m2.metric("Neckline Target",f"${neck:.2f}")
-            m3.metric("W2 Zone",        f"${w1:.2f} – ${ztop:.2f}")
-            m4.metric("Current Price",  f"${cur:.2f}", delta=f"{((cur/w1)-1)*100:.1f}% above W1")
-
-            if df_c is not None and len(df_c) > 5:
-                fig = go.Figure()
-                fig.add_trace(go.Candlestick(
-                    x=df_c.index,
-                    open=df_c["Open"], high=df_c["High"],
-                    low=df_c["Low"],   close=df_c["Close"],
-                    name=tk,
-                    increasing_line_color="#40e0b0", increasing_fillcolor="#1a4a3a",
-                    decreasing_line_color="#e05050", decreasing_fillcolor="#4a1a1a",
-                ))
-                fig.add_hrect(y0=w1 * 0.994, y1=ztop,
-                              fillcolor="rgba(139,92,246,0.18)", line_width=0)
-                fig.add_hline(y=w1, line_dash="dash", line_color="#f97316", line_width=1.5,
-                              annotation_text=f"W1 ${w1:.2f}", annotation_position="bottom right",
-                              annotation_font_color="#f97316", annotation_font_size=11)
-                fig.add_hline(y=neck, line_dash="dash", line_color="#22c55e", line_width=1.5,
-                              annotation_text=f"Neckline ${neck:.2f}", annotation_position="top right",
-                              annotation_font_color="#22c55e", annotation_font_size=11)
-                fig.add_hline(y=ztop, line_dash="dot", line_color="#9b59b6", line_width=1,
-                              annotation_text="Zone top", annotation_position="top left",
-                              annotation_font_color="#9b59b6", annotation_font_size=10)
-                fig.update_layout(
-                    height=340,
-                    paper_bgcolor="rgba(5,5,20,0)", plot_bgcolor="rgba(5,5,20,0)",
-                    font=dict(color="#8888bb", size=11),
-                    xaxis=dict(showgrid=False, rangeslider_visible=False, color="#4a5a7a"),
-                    yaxis=dict(showgrid=True, gridcolor="rgba(50,50,80,0.3)", color="#4a5a7a"),
-                    margin=dict(l=10, r=90, t=20, b=10),
-                    showlegend=False,
-                )
-                st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
-
-    if in_zone:
-        st.markdown(
-            '<div style="font-size:12px;font-weight:800;color:#f87171;letter-spacing:0.18em;'
-            'text-transform:uppercase;margin-bottom:8px;">⚡ In W2 Zone Now — Watch for Entry Signal</div>',
-            unsafe_allow_html=True,
-        )
-        for s in in_zone:
-            _render_setup(s)
-
-    if watching:
-        st.markdown(
-            '<div style="font-size:12px;font-weight:800;color:#f9c846;letter-spacing:0.18em;'
-            'text-transform:uppercase;margin:18px 0 8px 0;">Approaching W2 Zone — Pattern Forming</div>',
-            unsafe_allow_html=True,
-        )
-        for s in watching:
-            _render_setup(s)
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    else:
+        st.warning(f"Chart data unavailable for {sel}.")
 
 
 def show_recommended_view(user_id=""):
