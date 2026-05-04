@@ -1014,12 +1014,6 @@ def scan_e7_watching(ticker: str, df, spy_df):
         w1_price = float(lows_arr[w1_local_idx])
         zone_top = w1_price * (1 + E7_ZONE_PCT)
 
-        # If a newer local minimum is at or below this level, the old W1 is
-        # superseded — don't fall back to it (avoids labelling a new lower low
-        # as "approaching W2" when it IS the new W1 still forming a neckline)
-        if any(float(lows_arr[i]) <= w1_price for i in min_idxs if i > w1_local_idx):
-            continue
-
         # Neckline = highest close from W1 onward in lookback
         neckline = float(close_arr[w1_local_idx:].max())
         if neckline < w1_price * (1 + E7_NECKLINE_MIN):
