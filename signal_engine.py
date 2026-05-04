@@ -956,6 +956,128 @@ def get_pattern_signal(ticker: str, df: "pd.DataFrame", spy_df: "pd.DataFrame") 
     return _NO_TRADE
 
 
+def scan_e7_watching(ticker: str, df, spy_df):
+    """
+    Returns a setup dict if this ticker has a valid E7 double bottom forming:
+      - W1 detected + depth/velocity pass
+      - Price rallied to neckline (left side of W confirmed)
+      - Price now pulling back below neckline (right side developing)
+      - Support not broken
+    Returns None if no qualifying setup found.
+    """
+    import numpy as np
+    import pandas as pd
+    from scipy.signal import argrelextrema
+
+    if spy_df is None or len(spy_df) < 55:
+        return None
+    try:
+        spy_close_s = spy_df["Close"].squeeze().dropna()
+        spy_ma50    = float(spy_close_s.rolling(50).mean().iloc[-1])
+        if float(spy_close_s.iloc[-1]) <= spy_ma50:
+            return None
+    except Exception:
+        return None
+
+    try:
+        close_s = df["Close"].squeeze().dropna()
+        open_s  = df["Open"].squeeze().reindex(close_s.index)
+        low_s   = df["Low"].squeeze().reindex(close_s.index)
+        high_s  = df["High"].squeeze().reindex(close_s.index)
+    except Exception:
+        return None
+
+    if len(close_s) < 200:
+        return None
+
+    cur_close = float(close_s.iloc[-1])
+    if pd.isna(cur_close):
+        return None
+
+    lb_close = close_s.iloc[-(E7_LOOKBACK + 1):-1]
+    lb_low   = low_s.iloc[-(E7_LOOKBACK + 1):-1]
+    lb_high  = high_s.iloc[-(E7_LOOKBACK + 1):-1]
+    n = len(lb_close)
+    if n < E7_ORDER_W1 * 2 + E7_MIN_SEP + 5:
+        return None
+
+    lows_arr  = lb_low.values
+    close_arr = lb_close.values
+    highs_arr = lb_high.values
+
+    min_idxs = argrelextrema(lows_arr, np.less, order=E7_ORDER_W1)[0]
+    min_idxs = [i for i in min_idxs if i <= n - E7_MIN_SEP - 1]
+
+    for w1_local_idx in reversed(min_idxs):
+        w1_price = float(lows_arr[w1_local_idx])
+
+        # Neckline = highest close from W1 onward in lookback
+        neckline = float(close_arr[w1_local_idx:].max())
+        if neckline < w1_price * (1 + E7_NECKLINE_MIN):
+            continue
+
+        # Price must be pulling back: current below neckline
+        if cur_close >= neckline:
+            continue
+
+        # Support not broken
+        if cur_close < w1_price * (1 - E7_CANCEL_PCT):
+            continue
+
+        # Depth from prior high
+        pre_start  = max(0, w1_local_idx - E7_DEPTH_WINDOW)
+        pre_highs  = highs_arr[pre_start: w1_local_idx]
+        if len(pre_highs) == 0:
+            continue
+        high_idx   = int(np.argmax(pre_highs))
+        prior_high = float(pre_highs[high_idx])
+        if prior_high <= w1_price:
+            continue
+        w1_depth = prior_high / w1_price - 1
+        if w1_depth < E7_DEPTH_MIN:
+            continue
+
+        # Velocity
+        bars_from_high = max(1, len(pre_highs) - high_idx)
+        w1_velocity    = w1_depth / bars_from_high
+        if w1_velocity < E7_VELOCITY_MIN or w1_velocity > E7_VELOCITY_MAX:
+            continue
+
+        zone_top       = w1_price * (1 + E7_ZONE_PCT)
+        in_zone        = cur_close <= zone_top
+        pct_above_zone = max(0.0, (cur_close - zone_top) / zone_top)
+
+        # Build chart slice: 10 bars before W1 → current bar
+        w1_date    = lb_close.index[w1_local_idx]
+        chart_loc  = close_s.index.get_indexer([w1_date], method="nearest")[0]
+        chart_loc  = max(0, chart_loc - 10)
+        df_chart   = pd.DataFrame({
+            "Open":   open_s.iloc[chart_loc:],
+            "High":   high_s.iloc[chart_loc:],
+            "Low":    low_s.iloc[chart_loc:],
+            "Close":  close_s.iloc[chart_loc:],
+        })
+
+        _tier1 = (w1_depth >= 0.20) or (0.010 <= w1_velocity <= 0.015)
+
+        return {
+            "ticker":         ticker,
+            "w1_price":       round(w1_price, 2),
+            "w1_date":        w1_date,
+            "neckline":       round(neckline, 2),
+            "zone_top":       round(zone_top, 2),
+            "cur_close":      round(cur_close, 2),
+            "depth":          w1_depth,
+            "velocity":       w1_velocity,
+            "in_zone":        in_zone,
+            "pct_above_zone": pct_above_zone,
+            "df_chart":       df_chart,
+            "tier1":          _tier1,
+        }
+
+    return None
+
+
 if __name__ == "__main__":
     from fetcher import fetch_price_data
     from indicators import compute_indicators
