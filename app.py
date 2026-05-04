@@ -733,37 +733,68 @@ def price_chart(df, sig, ind, e7_setup=None):
         zone_top  = e7_setup["zone_top"]
         neckline  = e7_setup["neckline"]
         w1_date   = e7_setup["w1_date"]
+        _teal     = "#4ecdc4"
 
-        # W2 anticipation zone — shaded band between W1 and zone_top
+        # W2 anticipation zone — shaded band between W1 support and zone_top
         fig.add_hrect(
             y0=w1_price, y1=zone_top,
-            fillcolor="rgba(78,205,196,0.08)",
-            line=dict(color="rgba(78,205,196,0.25)", width=1, dash="dot"),
-            layer="below",
+            fillcolor="rgba(78,205,196,0.18)",
+            line=dict(color="rgba(78,205,196,0.55)", width=1, dash="dot"),
+            layer="above",
         )
-        # W1 support line
-        fig.add_hline(
-            y=w1_price,
-            line=dict(color="#4ecdc4", dash="dash", width=1.5),
-            annotation_text="W1", annotation_font_color="#4ecdc4",
-            annotation_position="right",
+        # W1 support line + label
+        fig.add_shape(type="line",
+            x0=0, x1=1, xref="paper",
+            y0=w1_price, y1=w1_price,
+            line=dict(color=_teal, dash="dash", width=2),
         )
-        # Neckline / target
-        fig.add_hline(
-            y=neckline,
-            line=dict(color="#4ecdc4", dash="dot", width=1.5),
-            annotation_text="Neckline", annotation_font_color="#4ecdc4",
-            annotation_position="right",
+        fig.add_annotation(
+            x=0.01, xref="paper", y=w1_price,
+            text=f"W1  ${w1_price:.2f}",
+            showarrow=False, font=dict(color=_teal, size=11),
+            bgcolor="rgba(7,7,26,0.7)", borderpad=3,
+            xanchor="left", yanchor="bottom",
         )
-        # W1 low marker dot
-        if w1_date in chart_df.index:
-            fig.add_trace(go.Scatter(
-                x=[w1_date], y=[w1_price],
-                mode="markers",
-                marker=dict(color="#4ecdc4", size=10, symbol="circle",
-                            line=dict(color="#ffffff", width=1.5)),
-                name="W1", showlegend=True,
-            ))
+        # Zone top line (top of W2 zone)
+        fig.add_shape(type="line",
+            x0=0, x1=1, xref="paper",
+            y0=zone_top, y1=zone_top,
+            line=dict(color=_teal, dash="dot", width=1),
+        )
+        fig.add_annotation(
+            x=0.01, xref="paper", y=zone_top,
+            text=f"W2 Zone  ${zone_top:.2f}",
+            showarrow=False, font=dict(color=_teal, size=10),
+            bgcolor="rgba(7,7,26,0.7)", borderpad=3,
+            xanchor="left", yanchor="top",
+        )
+        # Neckline
+        fig.add_shape(type="line",
+            x0=0, x1=1, xref="paper",
+            y0=neckline, y1=neckline,
+            line=dict(color=_teal, dash="dash", width=2),
+        )
+        fig.add_annotation(
+            x=0.01, xref="paper", y=neckline,
+            text=f"Neckline  ${neckline:.2f}",
+            showarrow=False, font=dict(color=_teal, size=11),
+            bgcolor="rgba(7,7,26,0.7)", borderpad=3,
+            xanchor="left", yanchor="bottom",
+        )
+        # W1 marker dot (if W1 date falls inside the 90-day chart window)
+        import pandas as pd
+        try:
+            w1_ts = pd.Timestamp(w1_date)
+            if w1_ts >= chart_df.index[0]:
+                fig.add_trace(go.Scatter(
+                    x=[w1_ts], y=[w1_price],
+                    mode="markers",
+                    marker=dict(color=_teal, size=10, symbol="circle",
+                                line=dict(color="#ffffff", width=1.5)),
+                    name="W1", showlegend=True,
+                ))
+        except Exception:
+            pass
 
     fig.update_layout(
         paper_bgcolor="#07071a",
@@ -2381,7 +2412,11 @@ for item in results:
     # ── Price Chart ───────────────────────────────────────────────────────────
     with st.container(border=True):
         st.markdown('<div class="panel-title">📈 &nbsp; Price Chart &nbsp;<span style="font-size:10px;color:#33336a;font-weight:400;">90-day · MA50 · MA200</span></div>', unsafe_allow_html=True)
-        st.plotly_chart(price_chart(df, sig, ind, e7_setup=get_e7_setup(ticker)), use_container_width=True, config={"displayModeBar": False})
+        try:
+            _e7 = get_e7_setup(ticker)
+        except Exception:
+            _e7 = None
+        st.plotly_chart(price_chart(df, sig, ind, e7_setup=_e7), use_container_width=True, config={"displayModeBar": False})
 
     st.write("")
 
