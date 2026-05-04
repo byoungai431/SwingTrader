@@ -93,7 +93,84 @@ def init_db():
                     PRIMARY KEY (user_id, ticker)
                 )
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS e7_watching (
+                    ticker      TEXT PRIMARY KEY,
+                    w1_price    REAL,
+                    w1_date     TEXT,
+                    neckline    REAL,
+                    zone_top    REAL,
+                    cur_close   REAL,
+                    depth       REAL,
+                    velocity    REAL,
+                    in_zone     INTEGER DEFAULT 0,
+                    pct_above   REAL,
+                    tier1       INTEGER DEFAULT 0,
+                    scanned_at  TEXT
+                )
+            """)
         conn.commit()
+    finally:
+        conn.close()
+
+
+def save_e7_watching(setups: list):
+    """Replace all E7 watching setups with today's scan results."""
+    init_db()
+    conn = get_conn()
+    scanned_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM e7_watching")
+            for s in setups:
+                cur.execute("""
+                    INSERT INTO e7_watching
+                        (ticker, w1_price, w1_date, neckline, zone_top, cur_close,
+                         depth, velocity, in_zone, pct_above, tier1, scanned_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (ticker) DO UPDATE SET
+                        w1_price=EXCLUDED.w1_price, w1_date=EXCLUDED.w1_date,
+                        neckline=EXCLUDED.neckline, zone_top=EXCLUDED.zone_top,
+                        cur_close=EXCLUDED.cur_close, depth=EXCLUDED.depth,
+                        velocity=EXCLUDED.velocity, in_zone=EXCLUDED.in_zone,
+                        pct_above=EXCLUDED.pct_above, tier1=EXCLUDED.tier1,
+                        scanned_at=EXCLUDED.scanned_at
+                """, (
+                    s["ticker"], float(s["w1_price"]),
+                    str(s["w1_date"])[:10],
+                    float(s["neckline"]), float(s["zone_top"]),
+                    float(s["cur_close"]), float(s["depth"]),
+                    float(s["velocity"]), int(s["in_zone"]),
+                    float(s["pct_above_zone"]), int(s["tier1"]),
+                    scanned_at,
+                ))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_e7_watching() -> list[dict]:
+    """Return all E7 watching setups sorted by urgency."""
+    init_db()
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT ticker, w1_price, w1_date, neckline, zone_top, cur_close,
+                       depth, velocity, in_zone, pct_above, tier1, scanned_at
+                FROM e7_watching
+                ORDER BY in_zone DESC, pct_above ASC
+            """)
+            rows = cur.fetchall()
+        return [
+            {
+                "ticker": r[0], "w1_price": r[1], "w1_date": r[2],
+                "neckline": r[3], "zone_top": r[4], "cur_close": r[5],
+                "depth": r[6], "velocity": r[7], "in_zone": bool(r[8]),
+                "pct_above_zone": r[9], "tier1": bool(r[10]), "scanned_at": r[11],
+            }
+            for r in rows
+        ]
     finally:
         conn.close()
 

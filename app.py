@@ -18,13 +18,13 @@ from history import (save_signal, get_history, dismiss_signal,
                       enter_position, get_my_open_positions,
                       get_my_position_history, close_my_position, get_conn,
                       get_watchlist, save_watchlist,
-                      get_user_settings, save_user_settings)
+                      get_user_settings, save_user_settings,
+                      get_e7_watching)
 from config import WATCHLIST, ANTHROPIC_API_KEY
 from notify import send_exit_alert
 from signal_engine import (compute_hot_sectors, get_sector_hunter_signal,
                            get_index_fade_signal, get_leveraged_signal,
-                           get_regime_signal, get_chop_signal, get_pattern_signal,
-                           scan_e7_watching)
+                           get_regime_signal, get_chop_signal, get_pattern_signal)
 
 st.set_page_config(page_title="Nexus Edge", layout="wide", page_icon="📊")
 
@@ -1090,72 +1090,67 @@ def show_charts_watch_view():
         unsafe_allow_html=True,
     )
 
-    col_back, col_scan, col_info = st.columns([1, 2, 1])
-    with col_back:
-        if st.button("← Back", key="ctw_back"):
-            st.session_state.show_charts_watch = False
-            st.rerun()
-    with col_scan:
-        run_scan = st.button("🔍  Scan S&P 500 for Setups", use_container_width=True, key="ctw_scan")
+    if st.button("← Back", key="ctw_back"):
+        st.session_state.show_charts_watch = False
+        st.rerun()
 
-    if run_scan or st.session_state.get("ctw_results") is None:
-        if run_scan:
-            st.session_state.ctw_results = None
-
-        _sectors = _get_sp500_sector_map_cached()
-        all_tickers = list(_sectors.keys())
-
-        try:
-            spy_df = fetch_price_data("SPY")
-        except Exception:
-            st.error("Could not fetch SPY data.")
-            return
-
-        setups = []
-        prog = st.progress(0, text="Scanning S&P 500…")
-        for i, tk in enumerate(all_tickers):
-            prog.progress((i + 1) / len(all_tickers), text=f"Scanning {tk}…")
-            try:
-                df_tk = fetch_price_data(tk)
-                result = scan_e7_watching(tk, df_tk, spy_df)
-                if result:
-                    setups.append(result)
-            except Exception:
-                pass
-        prog.empty()
-
-        setups.sort(key=lambda s: (not s["in_zone"], s["pct_above_zone"]))
-        st.session_state.ctw_results = setups
-
-    setups = st.session_state.get("ctw_results", [])
+    setups = get_e7_watching()
 
     if not setups:
-        st.info("No E7 double bottom setups found. Try again after market hours or during a pullback environment.")
+        st.info("No E7 setups in database yet. Run the daily scan to populate this page.")
         return
 
-    in_zone   = [s for s in setups if s["in_zone"]]
-    watching  = [s for s in setups if not s["in_zone"]]
+    scanned_at = setups[0].get("scanned_at", "")
+    in_zone  = [s for s in setups if s["in_zone"]]
+    watching = [s for s in setups if not s["in_zone"]]
 
     st.markdown(
-        f'<div style="text-align:center;padding:10px 0 18px 0;font-size:13px;color:#8888bb;">'
-        f'Found <b style="color:#c8c8ff;">{len(setups)}</b> active setups — '
-        f'<b style="color:#f87171;">{len(in_zone)}</b> in W2 zone now · '
-        f'<b style="color:#f9c846;">{len(watching)}</b> approaching</div>',
+        f'<div style="text-align:center;padding:6px 0 18px 0;font-size:13px;color:#8888bb;">'
+        f'<b style="color:#c8c8ff;">{len(setups)}</b> active setups — '
+        f'<b style="color:#f87171;">{len(in_zone)}</b> in W2 zone · '
+        f'<b style="color:#f9c846;">{len(watching)}</b> approaching'
+        f'<span style="font-size:11px;color:#3a4a6a;margin-left:14px;">Updated {scanned_at}</span>'
+        f'</div>',
         unsafe_allow_html=True,
     )
 
+    # Batch-fetch chart data for all tickers (fast — one yfinance call per ticker)
+    if "ctw_charts" not in st.session_state or st.session_state.get("ctw_scan_time") != scanned_at:
+        charts = {}
+        for s in setups:
+            try:
+                df_tk   = fetch_price_data(s["ticker"])
+                close_s = df_tk["Close"].squeeze().dropna()
+                open_s  = df_tk["Open"].squeeze().reindex(close_s.index)
+                high_s  = df_tk["High"].squeeze().reindex(close_s.index)
+                low_s   = df_tk["Low"].squeeze().reindex(close_s.index)
+                import pandas as pd
+                w1_date = pd.Timestamp(s["w1_date"])
+                loc     = close_s.index.get_indexer([w1_date], method="nearest")[0]
+                loc     = max(0, loc - 10)
+                charts[s["ticker"]] = pd.DataFrame({
+                    "Open": open_s.iloc[loc:], "High": high_s.iloc[loc:],
+                    "Low":  low_s.iloc[loc:],  "Close": close_s.iloc[loc:],
+                })
+            except Exception:
+                pass
+        st.session_state.ctw_charts    = charts
+        st.session_state.ctw_scan_time = scanned_at
+
+    charts = st.session_state.ctw_charts
+
     def _render_setup(s):
-        tk       = s["ticker"]
-        w1       = s["w1_price"]
-        neck     = s["neckline"]
-        ztop     = s["zone_top"]
-        cur      = s["cur_close"]
-        depth    = s["depth"]
-        vel      = s["velocity"]
-        in_z     = s["in_zone"]
-        pct_aw   = s["pct_above_zone"]
-        tier1    = s["tier1"]
-        df_c     = s["df_chart"]
+        tk     = s["ticker"]
+        w1     = s["w1_price"]
+        neck   = s["neckline"]
+        ztop   = s["zone_top"]
+        cur    = s["cur_close"]
+        depth  = s["depth"]
+        vel    = s["velocity"]
+        in_z   = s["in_zone"]
+        pct_aw = s["pct_above_zone"]
+        tier1  = s["tier1"]
+        df_c   = charts.get(tk)
 
         tier_badge = (
             '<span style="background:#1a3a5c;color:#40E0FF;font-size:10px;font-weight:800;'
@@ -1180,57 +1175,43 @@ def show_charts_watch_view():
                 f'</div>',
                 unsafe_allow_html=True,
             )
-
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric("W1 Support", f"${w1:.2f}")
-            m2.metric("Neckline Target", f"${neck:.2f}")
-            m3.metric("W2 Zone", f"${w1:.2f} – ${ztop:.2f}")
-            m4.metric("Current Price", f"${cur:.2f}", delta=f"{((cur/w1)-1)*100:.1f}% above W1")
+            m1.metric("W1 Support",     f"${w1:.2f}")
+            m2.metric("Neckline Target",f"${neck:.2f}")
+            m3.metric("W2 Zone",        f"${w1:.2f} – ${ztop:.2f}")
+            m4.metric("Current Price",  f"${cur:.2f}", delta=f"{((cur/w1)-1)*100:.1f}% above W1")
 
-            # Plotly chart
-            fig = go.Figure()
-            fig.add_trace(go.Candlestick(
-                x=df_c.index,
-                open=df_c["Open"], high=df_c["High"],
-                low=df_c["Low"],   close=df_c["Close"],
-                name=tk,
-                increasing_line_color="#40e0b0", increasing_fillcolor="#1a4a3a",
-                decreasing_line_color="#e05050", decreasing_fillcolor="#4a1a1a",
-            ))
-            # W2 anticipation zone (shaded)
-            fig.add_hrect(
-                y0=w1 * 0.994, y1=ztop,
-                fillcolor="rgba(139,92,246,0.18)", line_width=0,
-            )
-            # W1 support line
-            fig.add_hline(
-                y=w1, line_dash="dash", line_color="#f97316", line_width=1.5,
-                annotation_text=f"W1 ${w1:.2f}", annotation_position="bottom right",
-                annotation_font_color="#f97316", annotation_font_size=11,
-            )
-            # Neckline
-            fig.add_hline(
-                y=neck, line_dash="dash", line_color="#22c55e", line_width=1.5,
-                annotation_text=f"Neckline ${neck:.2f}", annotation_position="top right",
-                annotation_font_color="#22c55e", annotation_font_size=11,
-            )
-            # Zone top label
-            fig.add_hline(
-                y=ztop, line_dash="dot", line_color="#9b59b6", line_width=1,
-                annotation_text="Zone top", annotation_position="top left",
-                annotation_font_color="#9b59b6", annotation_font_size=10,
-            )
-            fig.update_layout(
-                height=340,
-                paper_bgcolor="rgba(5,5,20,0)",
-                plot_bgcolor="rgba(5,5,20,0)",
-                font=dict(color="#8888bb", size=11),
-                xaxis=dict(showgrid=False, rangeslider_visible=False, color="#4a5a7a"),
-                yaxis=dict(showgrid=True, gridcolor="rgba(50,50,80,0.3)", color="#4a5a7a"),
-                margin=dict(l=10, r=90, t=20, b=10),
-                showlegend=False,
-            )
-            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+            if df_c is not None and len(df_c) > 5:
+                fig = go.Figure()
+                fig.add_trace(go.Candlestick(
+                    x=df_c.index,
+                    open=df_c["Open"], high=df_c["High"],
+                    low=df_c["Low"],   close=df_c["Close"],
+                    name=tk,
+                    increasing_line_color="#40e0b0", increasing_fillcolor="#1a4a3a",
+                    decreasing_line_color="#e05050", decreasing_fillcolor="#4a1a1a",
+                ))
+                fig.add_hrect(y0=w1 * 0.994, y1=ztop,
+                              fillcolor="rgba(139,92,246,0.18)", line_width=0)
+                fig.add_hline(y=w1, line_dash="dash", line_color="#f97316", line_width=1.5,
+                              annotation_text=f"W1 ${w1:.2f}", annotation_position="bottom right",
+                              annotation_font_color="#f97316", annotation_font_size=11)
+                fig.add_hline(y=neck, line_dash="dash", line_color="#22c55e", line_width=1.5,
+                              annotation_text=f"Neckline ${neck:.2f}", annotation_position="top right",
+                              annotation_font_color="#22c55e", annotation_font_size=11)
+                fig.add_hline(y=ztop, line_dash="dot", line_color="#9b59b6", line_width=1,
+                              annotation_text="Zone top", annotation_position="top left",
+                              annotation_font_color="#9b59b6", annotation_font_size=10)
+                fig.update_layout(
+                    height=340,
+                    paper_bgcolor="rgba(5,5,20,0)", plot_bgcolor="rgba(5,5,20,0)",
+                    font=dict(color="#8888bb", size=11),
+                    xaxis=dict(showgrid=False, rangeslider_visible=False, color="#4a5a7a"),
+                    yaxis=dict(showgrid=True, gridcolor="rgba(50,50,80,0.3)", color="#4a5a7a"),
+                    margin=dict(l=10, r=90, t=20, b=10),
+                    showlegend=False,
+                )
+                st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
     if in_zone:
         st.markdown(

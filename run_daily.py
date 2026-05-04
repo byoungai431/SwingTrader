@@ -22,8 +22,8 @@ from indicators import compute_indicators
 from signal_engine import (get_signal, get_index_fade_signal, get_leveraged_signal, get_regime_signal,
                            compute_hot_sectors, get_sector_hunter_signal, E5_SECTOR_ETF_MAP,
                            get_chop_signal, E6_CONSEC_LOSS_LIMIT, E6_LOSS_COOLDOWN_DAYS,
-                           get_pattern_signal)
-from history import save_signal, get_performance_stats, get_conn
+                           get_pattern_signal, scan_e7_watching)
+from history import save_signal, get_performance_stats, get_conn, save_e7_watching
 from notify import send_telegram, send_daily_summary, send_daily_telegram, send_push, send_exit_alert
 
 # ── Set to False to fall back to watchlist only ───────────────────────────────
@@ -541,6 +541,7 @@ def run():
     results          = {"BUY": [], "SELL": [], "NO TRADE": [], "ERROR": []}
     notify_signals   = []   # collects signal dicts for BUY/SELL to notify at end
     skipped          = 0
+    e7_watching_setups = []
 
     for ticker in universe:
         # Skip if already processed today
@@ -594,6 +595,10 @@ def run():
                 sig_e7 = get_pattern_signal(ticker, df, _spy_df)
                 if sig_e7.get("signal") == "BUY":
                     generated_signals.append(sig_e7)
+                else:
+                    watch = scan_e7_watching(ticker, df, _spy_df)
+                    if watch:
+                        e7_watching_setups.append(watch)
 
             # Engine 1: Core Long Swing (rule-based, no API)
             if ticker not in _rule_etfs:
@@ -704,9 +709,11 @@ def run():
             print(f"  {ticker}: ERROR — {e}")
             results["ERROR"].append(ticker)
 
+    save_e7_watching(e7_watching_setups)
     print(f"\n{'─'*60}")
     print(f"  Universe : {source}")
     print(f"  Skipped  : {skipped} (already run today)")
+    print(f"  E7 Watch : {len(e7_watching_setups)} setups saved")
     print(f"  BUY      ({len(results['BUY'])}): {', '.join(results['BUY']) or '—'}")
     print(f"  SELL     ({len(results['SELL'])}): {', '.join(results['SELL']) or '—'}")
     print(f"  ERRORS   ({len(results['ERROR'])}): {', '.join(results['ERROR']) or '—'}")
