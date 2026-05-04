@@ -1116,13 +1116,15 @@ def show_charts_watch_view():
 
     scanned_at  = setups[0].get("scanned_at", "")
 
-    col_inzone  = [s for s in setups if s["in_zone"]]
-    col_approach= [s for s in setups if not s["in_zone"] and s["pct_above_zone"] <= 0.05]
-    col_watch   = [s for s in setups if not s["in_zone"] and s["pct_above_zone"] >  0.05]
+    developing   = [s for s in setups if not s.get("missed_active")]
+    col_inzone   = [s for s in developing if s["in_zone"]]
+    col_approach = [s for s in developing if not s["in_zone"] and s["pct_above_zone"] <= 0.05]
+    col_watch    = [s for s in developing if not s["in_zone"] and s["pct_above_zone"] >  0.05]
+    col_missed   = [s for s in setups if s.get("missed_active")]
 
     st.markdown(
         f'<div style="padding:4px 0 16px 0;font-size:12px;color:#5a6a8a;">'
-        f'<b style="color:#c8c8ff;">{len(setups)}</b> setups &nbsp;·&nbsp; '
+        f'<b style="color:#c8c8ff;">{len(developing)}</b> developing &nbsp;·&nbsp; '
         f'<span style="color:#f87171;">{len(col_inzone)} in zone</span> &nbsp;·&nbsp; '
         f'<span style="color:#f9c846;">{len(col_approach)} approaching</span> &nbsp;·&nbsp; '
         f'<span style="color:#7777aa;">{len(col_watch)} watching</span>'
@@ -1184,6 +1186,36 @@ def show_charts_watch_view():
         _col_header("👀  Watching", len(col_watch), "#7777aa")
         for s in col_watch:
             _card(s)
+
+    # ── Missed but Still Active ─────────────────────────────────────────────────
+    if col_missed:
+        st.markdown(
+            '<div style="margin-top:28px;padding:10px 0 6px 0;'
+            'border-top:1px solid rgba(80,80,120,0.35);">'
+            '<span style="font-size:11px;font-weight:800;letter-spacing:0.18em;'
+            'text-transform:uppercase;color:#4ecdc4;">🎯  Missed — Still Active</span>'
+            '<span style="font-size:11px;color:#4a5a7a;margin-left:10px;">'
+            'W2 triggered · trade in progress · neckline not yet reached</span>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        m1, m2, m3 = st.columns(3)
+        for i, s in enumerate(col_missed):
+            with [m1, m2, m3][i % 3]:
+                tk   = s["ticker"]
+                w1   = s["w1_price"]
+                neck = s["neckline"]
+                cur  = s["cur_close"]
+                pct_to_neck = (neck - cur) / neck * 100
+                label = f"{tk}\nW1 ${w1:.2f}  ·  Target ${neck:.2f}\nNow ${cur:.2f}  ·  {pct_to_neck:.1f}% to target"
+                if st.button(label, key=f"ctw_missed_{tk}", use_container_width=True):
+                    st.session_state.selected_ticker   = tk
+                    st.session_state.analyzed          = False
+                    st.session_state.show_recommended  = False
+                    st.session_state.results_tickers   = []
+                    st.session_state.auto_run          = True
+                    st.session_state.show_charts_watch = False
+                    st.rerun()
 
 
 

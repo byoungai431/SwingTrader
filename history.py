@@ -95,20 +95,22 @@ def init_db():
             """)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS e7_watching (
-                    ticker      TEXT PRIMARY KEY,
-                    w1_price    REAL,
-                    w1_date     TEXT,
-                    neckline    REAL,
-                    zone_top    REAL,
-                    cur_close   REAL,
-                    depth       REAL,
-                    velocity    REAL,
-                    in_zone     INTEGER DEFAULT 0,
-                    pct_above   REAL,
-                    tier1       INTEGER DEFAULT 0,
-                    scanned_at  TEXT
+                    ticker        TEXT PRIMARY KEY,
+                    w1_price      REAL,
+                    w1_date       TEXT,
+                    neckline      REAL,
+                    zone_top      REAL,
+                    cur_close     REAL,
+                    depth         REAL,
+                    velocity      REAL,
+                    in_zone       INTEGER DEFAULT 0,
+                    pct_above     REAL,
+                    tier1         INTEGER DEFAULT 0,
+                    scanned_at    TEXT,
+                    missed_active INTEGER DEFAULT 0
                 )
             """)
+            cur.execute("ALTER TABLE e7_watching ADD COLUMN IF NOT EXISTS missed_active INTEGER DEFAULT 0")
         conn.commit()
     finally:
         conn.close()
@@ -126,15 +128,17 @@ def save_e7_watching(setups: list):
                 cur.execute("""
                     INSERT INTO e7_watching
                         (ticker, w1_price, w1_date, neckline, zone_top, cur_close,
-                         depth, velocity, in_zone, pct_above, tier1, scanned_at)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                         depth, velocity, in_zone, pct_above, tier1, scanned_at,
+                         missed_active)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     ON CONFLICT (ticker) DO UPDATE SET
                         w1_price=EXCLUDED.w1_price, w1_date=EXCLUDED.w1_date,
                         neckline=EXCLUDED.neckline, zone_top=EXCLUDED.zone_top,
                         cur_close=EXCLUDED.cur_close, depth=EXCLUDED.depth,
                         velocity=EXCLUDED.velocity, in_zone=EXCLUDED.in_zone,
                         pct_above=EXCLUDED.pct_above, tier1=EXCLUDED.tier1,
-                        scanned_at=EXCLUDED.scanned_at
+                        scanned_at=EXCLUDED.scanned_at,
+                        missed_active=EXCLUDED.missed_active
                 """, (
                     s["ticker"], float(s["w1_price"]),
                     str(s["w1_date"])[:10],
@@ -142,7 +146,7 @@ def save_e7_watching(setups: list):
                     float(s["cur_close"]), float(s["depth"]),
                     float(s["velocity"]), int(s["in_zone"]),
                     float(s["pct_above_zone"]), int(s["tier1"]),
-                    scanned_at,
+                    scanned_at, int(s.get("missed_active", False)),
                 ))
         conn.commit()
     finally:
@@ -157,7 +161,8 @@ def get_e7_watching() -> list[dict]:
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT ticker, w1_price, w1_date, neckline, zone_top, cur_close,
-                       depth, velocity, in_zone, pct_above, tier1, scanned_at
+                       depth, velocity, in_zone, pct_above, tier1, scanned_at,
+                       missed_active
                 FROM e7_watching
                 ORDER BY in_zone DESC, pct_above ASC
             """)
@@ -168,6 +173,7 @@ def get_e7_watching() -> list[dict]:
                 "neckline": r[3], "zone_top": r[4], "cur_close": r[5],
                 "depth": r[6], "velocity": r[7], "in_zone": bool(r[8]),
                 "pct_above_zone": r[9], "tier1": bool(r[10]), "scanned_at": r[11],
+                "missed_active": bool(r[12]),
             }
             for r in rows
         ]

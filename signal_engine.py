@@ -1034,8 +1034,10 @@ def scan_e7_watching(ticker: str, df, spy_df):
         if cur_close < w1_price:
             continue
 
-        # Skip if W2 already played out: price dipped into zone AND had a
-        # bullish confirming close back above zone_top (took it or missed it)
+        # Check if W2 already confirmed: dipped into zone AND had a bullish
+        # close back above zone_top.  If still below neckline, flag as
+        # missed_active (show in a separate section) rather than dropping it.
+        missed_active   = False
         neck_local      = int(np.argmax(close_arr[w1_local_idx:])) + w1_local_idx
         post_nl         = lows_arr[neck_local + 1:]
         post_nc         = close_arr[neck_local + 1:]
@@ -1047,7 +1049,10 @@ def scan_e7_watching(ticker: str, df, spy_df):
                 for i in range(first_zone, len(post_nc))
             )
             if w2_confirmed:
-                continue
+                if cur_close < neckline and cur_close > w1_price:
+                    missed_active = True  # trade triggered; heading toward target
+                else:
+                    continue  # fully played out or broken below W1
 
         # Depth from prior high
         pre_start  = max(0, w1_local_idx - E7_DEPTH_WINDOW)
@@ -1097,6 +1102,7 @@ def scan_e7_watching(ticker: str, df, spy_df):
             "pct_above_zone": pct_above_zone,
             "df_chart":       df_chart,
             "tier1":          _tier1,
+            "missed_active":  missed_active,
         }
 
     return None
