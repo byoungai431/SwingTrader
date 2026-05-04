@@ -729,69 +729,68 @@ def price_chart(df, sig, ind, e7_setup=None):
 
     # E7 double-bottom annotations (when stock is on the watching list)
     if e7_setup:
+        import pandas as pd
         w1_price  = e7_setup["w1_price"]
         zone_top  = e7_setup["zone_top"]
         neckline  = e7_setup["neckline"]
         w1_date   = e7_setup["w1_date"]
-        _teal     = "#4ecdc4"
+        in_zone   = e7_setup.get("in_zone", False)
+        _green    = "#39d98a"
+        _red      = "#ff6b6b"
 
-        # W2 anticipation zone — shaded band between W1 support and zone_top
+        # ── Green support / W2 anticipation zone ──────────────────────────────
         fig.add_hrect(
-            y0=w1_price, y1=zone_top,
-            fillcolor="rgba(78,205,196,0.18)",
-            line=dict(color="rgba(78,205,196,0.55)", width=1, dash="dot"),
+            y0=w1_price * 0.985, y1=zone_top,
+            fillcolor="rgba(57,217,138,0.13)",
+            line=dict(color="rgba(57,217,138,0.5)", width=1.5),
             layer="above",
         )
-        # W1 support line + label
-        fig.add_shape(type="line",
-            x0=0, x1=1, xref="paper",
-            y0=w1_price, y1=w1_price,
-            line=dict(color=_teal, dash="dash", width=2),
-        )
+        # Zone label centered inside the band
         fig.add_annotation(
-            x=0.01, xref="paper", y=w1_price,
-            text=f"W1  ${w1_price:.2f}",
-            showarrow=False, font=dict(color=_teal, size=11),
-            bgcolor="rgba(7,7,26,0.7)", borderpad=3,
-            xanchor="left", yanchor="bottom",
+            x=0.5, xref="paper",
+            y=(w1_price + zone_top) / 2,
+            text="W1 · W2  SUPPORT ZONE",
+            showarrow=False,
+            font=dict(color="rgba(57,217,138,0.65)", size=10),
+            yanchor="middle",
         )
-        # Zone top line (top of W2 zone)
-        fig.add_shape(type="line",
-            x0=0, x1=1, xref="paper",
-            y0=zone_top, y1=zone_top,
-            line=dict(color=_teal, dash="dot", width=1),
-        )
-        fig.add_annotation(
-            x=0.01, xref="paper", y=zone_top,
-            text=f"W2 Zone  ${zone_top:.2f}",
-            showarrow=False, font=dict(color=_teal, size=10),
-            bgcolor="rgba(7,7,26,0.7)", borderpad=3,
-            xanchor="left", yanchor="top",
-        )
-        # Neckline
+
+        # ── Red dotted neckline ────────────────────────────────────────────────
         fig.add_shape(type="line",
             x0=0, x1=1, xref="paper",
             y0=neckline, y1=neckline,
-            line=dict(color=_teal, dash="dash", width=2),
+            line=dict(color=_red, dash="dot", width=2),
         )
         fig.add_annotation(
             x=0.01, xref="paper", y=neckline,
             text=f"Neckline  ${neckline:.2f}",
-            showarrow=False, font=dict(color=_teal, size=11),
-            bgcolor="rgba(7,7,26,0.7)", borderpad=3,
+            showarrow=False,
+            font=dict(color=_red, size=11),
+            bgcolor="rgba(7,7,26,0.75)", borderpad=3,
             xanchor="left", yanchor="bottom",
         )
-        # W1 marker dot (if W1 date falls inside the 90-day chart window)
-        import pandas as pd
+
+        # ── W1 and W2 circle markers ───────────────────────────────────────────
         try:
             w1_ts = pd.Timestamp(w1_date)
+            xs, ys, labels = [], [], []
             if w1_ts >= chart_df.index[0]:
+                xs.append(w1_ts);  ys.append(w1_price);  labels.append("W1")
+            # W2 marker: show on last bar only when price is in zone
+            if in_zone:
+                xs.append(chart_df.index[-1])
+                ys.append(float(chart_df["Close"].iloc[-1]))
+                labels.append("W2")
+            if xs:
                 fig.add_trace(go.Scatter(
-                    x=[w1_ts], y=[w1_price],
-                    mode="markers",
-                    marker=dict(color=_teal, size=10, symbol="circle",
-                                line=dict(color="#ffffff", width=1.5)),
-                    name="W1", showlegend=True,
+                    x=xs, y=ys,
+                    mode="markers+text",
+                    marker=dict(color=_green, size=14, symbol="circle",
+                                line=dict(color="#ffffff", width=2)),
+                    text=labels,
+                    textposition="top center",
+                    textfont=dict(color=_green, size=11),
+                    showlegend=False,
                 ))
         except Exception:
             pass
