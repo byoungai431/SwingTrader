@@ -24,5 +24,8 @@ migrate_to_supabase.py
 # Claude Code local config
 .claude/
 
+# Claude auto-memory (internal to Claude Code sessions)
+memory/
+
 # OS
 .DS_Store

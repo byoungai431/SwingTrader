@@ -74,12 +74,15 @@ def get_signal(ticker: str, indicators: dict, fundamentals: dict | None = None) 
     # ── BUY conditions ────────────────────────────────────────────────────────
     cond_rsi  = rsi < RSI_ENTRY_MAX
     cond_macd = (macd_hist > 0) and (prev_mh <= 0)                     # histogram crosses above 0
-    cond_ma50 = (close > ma50) and (prev_close <= prev_ma50 * 1.01)    # reclaimed MA50 from below
+    cond_ma50 = (close > ma50) and (prev_close <= prev_ma50)             # reclaimed MA50 from below
     cond_vol  = (rel_vol is not None) and (rel_vol >= VOL_SPIKE_MIN)
 
     buys_count = sum([cond_rsi, cond_macd, cond_ma50, cond_vol])
 
     # ── SELL conditions ───────────────────────────────────────────────────────
+    # Note: E1 SELL signals are a secondary overlay. Primary exits are handled by the
+    # auto-exit system in run_daily.py (stop, trail, IBS, max-hold). E1 SELL only fires
+    # when there is an open BUY and bear-regime conditions are met simultaneously.
     cond_overbought = rsi > 65
     cond_macd_sell  = (macd_hist < 0) and (prev_mh >= 0)               # histogram crosses below 0
     cond_death      = ma50 < ma200
@@ -435,6 +438,7 @@ def compute_hot_sectors() -> set:
     """
     import numpy as np
     import pandas as pd
+    import yfinance as yf
 
     etfs = list(E5_SECTOR_ETF_MAP.values())
     try:
@@ -738,7 +742,8 @@ def get_chop_signal(ticker: str, df: "pd.DataFrame", spy_df: "pd.DataFrame") -> 
         (2.0 <= rel_vol < 3.0) or
         (18 <= adx_val < 22 and 35 <= rsi_val < 50)
     )
-    conf = 5 if is_t1 else 3  # T2/T3 both 3★ (Tier 4); only E7 is Tier 3 (4★)
+    # T2 and T3 intentionally share conf=3 — is_t2 is kept for the rationale label only
+    conf = 5 if is_t1 else 3
 
     path_labels = (["Path A (BB dip 2–5%)"] if path_a else []) + \
                   (["Path B (deep dip 9%+ rebound)"] if path_b else []) + \
@@ -930,7 +935,7 @@ def get_pattern_signal(ticker: str, df: "pd.DataFrame", spy_df: "pd.DataFrame") 
 
         _tier1 = (w1_depth >= 0.20) or (0.010 <= w1_velocity <= 0.015)
         _stars = 6 if _tier1 else 5
-        _star_label = "5★" if _stars == 6 else "4★"
+        _star_label = "5★ MAX" if _stars >= 6 else "5★"
 
         return {
             "ticker":             ticker,
