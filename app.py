@@ -116,6 +116,8 @@ if "show_positions" not in st.session_state:
     st.session_state.show_positions = False
 if "show_charts_watch" not in st.session_state:
     st.session_state.show_charts_watch = False
+if "show_chart_analyzer" not in st.session_state:
+    st.session_state.show_chart_analyzer = False
 if "auto_run" not in st.session_state:
     st.session_state.auto_run = False
 if "watchlist" not in st.session_state or st.session_state.get("_wl_user") != user_id:
@@ -1239,6 +1241,7 @@ def show_charts_watch_view():
 
     if st.button("← Back", key="ctw_back"):
         st.session_state.show_charts_watch = False
+        st.session_state.show_chart_analyzer = False
         st.rerun()
 
     setups = get_e7_watching()
@@ -1297,6 +1300,7 @@ def show_charts_watch_view():
             st.session_state.results_tickers  = []
             st.session_state.auto_run         = True
             st.session_state.show_charts_watch = False
+            st.session_state.show_chart_analyzer = False
             st.rerun()
 
     with c1:
@@ -1348,8 +1352,222 @@ def show_charts_watch_view():
                     st.session_state.results_tickers   = []
                     st.session_state.auto_run          = True
                     st.session_state.show_charts_watch = False
+                    st.session_state.show_chart_analyzer = False
                     st.rerun()
 
+
+
+def show_chart_analyzer_view():
+    """Chart Analyzer — two-column thumbnail grid, CONFIRMED above APPROACHING."""
+    from chart_analyzer.history import get_active_setups, get_backtest_stats
+    from chart_analyzer.charts import build_setup_card_figure
+
+    _PATTERN_LABELS = {
+        "InvHnS":      "Inv Head & Shoulders",
+        "AscTriangle": "Ascending Triangle",
+        "CupHandle":   "Cup & Handle",
+        "BullFlag":    "Bull Flag",
+        "FallingWedge":"Falling Wedge",
+    }
+    _STAGE_COLOR = {
+        "CONFIRMED":   "#00e676",
+        "APPROACHING": "#ffd54f",
+        "WATCHING":    "#7e57c2",
+        "DETECTED":    "#546e7a",
+    }
+
+    st.markdown(
+        '<div style="text-align:center;padding:28px 0 8px 0;">'
+        '<div style="font-size:26px;font-weight:900;letter-spacing:0.08em;color:#c8c8ff;">CHART ANALYZER</div>'
+        '<div style="font-size:11px;color:#4a5a7a;letter-spacing:0.22em;text-transform:uppercase;margin-top:4px;">'
+        'Pattern Recognition · Informational Only · Not Trade Signals</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    if st.button("← Back", key="ca_back"):
+        st.session_state.show_chart_analyzer = False
+        st.rerun()
+
+    # ── Backtest stats banner ─────────────────────────────────────────────────
+    try:
+        bt_stats = get_backtest_stats()
+        if bt_stats:
+            passed  = [s for s in bt_stats if s.get("passed")]
+            failed  = [s for s in bt_stats if not s.get("passed")]
+            cols_bt = st.columns(len(bt_stats))
+            for i, stat in enumerate(bt_stats):
+                pf      = stat.get("profit_factor", 0)
+                ptype   = stat.get("pattern_type", "")
+                ok      = stat.get("passed")
+                color   = "#00e676" if ok else "#ff5252"
+                label   = _PATTERN_LABELS.get(ptype, ptype)
+                with cols_bt[i]:
+                    st.markdown(
+                        f'<div style="background:rgba(14,14,32,0.8);border:1px solid rgba(50,50,90,0.6);'
+                        f'border-radius:8px;padding:8px 10px;text-align:center;">'
+                        f'<div style="font-size:9px;color:#4a5a7a;letter-spacing:0.15em;text-transform:uppercase;">{label}</div>'
+                        f'<div style="font-size:17px;font-weight:800;color:{color};">PF {pf:.2f}</div>'
+                        f'<div style="font-size:9px;color:{color};">{"✅ LIVE" if ok else "❌ EXCLUDED"}</div>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+    except Exception:
+        pass
+
+    st.markdown('<hr style="border:none;height:1px;background:linear-gradient(90deg,transparent,#0e2040,#40E0FF,#0e2040,transparent);margin:18px 0;">', unsafe_allow_html=True)
+
+    try:
+        confirmed   = get_active_setups(stage="CONFIRMED")
+        approaching = get_active_setups(stage="APPROACHING")
+        watching    = get_active_setups(stage="WATCHING")
+        detected    = get_active_setups(stage="DETECTED")
+    except Exception as e:
+        st.error(f"Could not load pattern setups: {e}")
+        st.info("Run `python -m chart_analyzer.scanner` to populate the database.")
+        return
+
+    total_active = len(confirmed) + len(approaching) + len(watching) + len(detected)
+
+    st.markdown(
+        f'<div style="padding:4px 0 16px 0;font-size:12px;color:#5a6a8a;">'
+        f'<b style="color:#c8c8ff;">{total_active}</b> active setups &nbsp;·&nbsp; '
+        f'<span style="color:#00e676;">🔔 {len(confirmed)} confirmed</span> &nbsp;·&nbsp; '
+        f'<span style="color:#ffd54f;">📡 {len(approaching)} approaching</span> &nbsp;·&nbsp; '
+        f'<span style="color:#7e57c2;">{len(watching)} watching</span> &nbsp;·&nbsp; '
+        f'<span style="color:#546e7a;">{len(detected)} detected</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    if total_active == 0:
+        st.info("No active patterns yet. Run `python -m chart_analyzer.scanner` to scan the universe.")
+        return
+
+    def _stage_badge(stage: str) -> str:
+        col = _STAGE_COLOR.get(stage, "#555588")
+        return (
+            f'<span style="display:inline-block;padding:2px 10px;border-radius:12px;'
+            f'font-size:10px;font-weight:800;letter-spacing:0.12em;'
+            f'background:rgba(0,0,0,0.4);color:{col};border:1px solid {col};">'
+            f'{stage}</span>'
+        )
+
+    def _render_thumbnail_grid(setups: list, section_title: str, icon: str, color: str):
+        if not setups:
+            return
+        st.markdown(
+            f'<div style="margin:24px 0 12px 0;">'
+            f'<span style="font-size:13px;font-weight:800;letter-spacing:0.18em;'
+            f'text-transform:uppercase;color:{color};">{icon} &nbsp; {section_title}</span>'
+            f'<span style="background:rgba(0,0,0,0.35);color:#8888bb;font-size:10px;'
+            f'padding:1px 8px;border-radius:10px;margin-left:10px;">{len(setups)}</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        for pair_start in range(0, len(setups), 2):
+            pair = setups[pair_start : pair_start + 2]
+            cols = st.columns(2)
+            for col_idx, setup in enumerate(pair):
+                with cols[col_idx]:
+                    ticker  = setup.get("ticker", "")
+                    ptype   = setup.get("pattern_type", "")
+                    stage   = setup.get("stage", "")
+                    stop    = setup.get("stop_price")
+                    target  = setup.get("target_price")
+                    entry   = setup.get("entry_price")
+                    vr      = setup.get("vol_ratio")
+                    notes   = setup.get("notes", "")
+                    label   = _PATTERN_LABELS.get(ptype, ptype)
+                    s_col   = _STAGE_COLOR.get(stage, "#555588")
+
+                    # Card wrapper
+                    st.markdown(
+                        f'<div style="background:rgba(12,12,30,0.85);border:1px solid rgba(60,60,100,0.5);'
+                        f'border-left:3px solid {s_col};border-radius:10px;padding:14px 16px 8px 16px;'
+                        f'margin-bottom:16px;">'
+                        f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">'
+                        f'<span style="font-size:20px;font-weight:900;color:#fff;">{ticker}</span>'
+                        f'{_stage_badge(stage)}'
+                        f'</div>'
+                        f'<div style="font-size:10px;color:#6060aa;letter-spacing:0.12em;'
+                        f'text-transform:uppercase;margin-bottom:10px;">{label}</div>'
+                        f'<div style="display:flex;gap:14px;font-size:11px;color:#8888bb;flex-wrap:wrap;">'
+                        + (f'<span>Entry <b style="color:#c8c8ff;">${entry:.2f}</b></span>' if entry else "")
+                        + (f'<span>Vol <b style="color:#ffd54f;">{vr:.1f}×</b></span>' if vr else "")
+                        + (f'<span>Stop <b style="color:#ff5252;">${stop:.2f}</b></span>' if stop else "")
+                        + (f'<span>Target <b style="color:#00e676;">${target:.2f}</b></span>' if target else "")
+                        + f'</div>'
+                        + (f'<div style="font-size:10px;color:#4a5a7a;margin-top:6px;">{notes}</div>' if notes else "")
+                        + f'</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                    # Plotly thumbnail
+                    with st.spinner(f"Loading {ticker}..."):
+                        fig = build_setup_card_figure(setup)
+                    if fig:
+                        st.plotly_chart(fig, use_container_width=True,
+                                        config={"displayModeBar": False})
+                    else:
+                        st.markdown(
+                            '<div style="height:120px;display:flex;align-items:center;justify-content:center;'
+                            'color:#3a4a5a;font-size:12px;">Chart unavailable</div>',
+                            unsafe_allow_html=True,
+                        )
+
+    # ── CONFIRMED (above APPROACHING) ─────────────────────────────────────────
+    _render_thumbnail_grid(confirmed, "CONFIRMED BREAKOUTS", "🔔", "#00e676")
+
+    # ── APPROACHING ───────────────────────────────────────────────────────────
+    _render_thumbnail_grid(approaching, "APPROACHING", "📡", "#ffd54f")
+
+    # ── WATCHING — compact list, no charts ────────────────────────────────────
+    if watching:
+        st.markdown(
+            f'<div style="margin:24px 0 10px 0;">'
+            f'<span style="font-size:13px;font-weight:800;letter-spacing:0.18em;'
+            f'text-transform:uppercase;color:#7e57c2;">👀 &nbsp; WATCHING</span>'
+            f'<span style="background:rgba(0,0,0,0.35);color:#8888bb;font-size:10px;'
+            f'padding:1px 8px;border-radius:10px;margin-left:10px;">{len(watching)}</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        w_cols = st.columns(3)
+        for i, s in enumerate(watching):
+            ticker  = s.get("ticker", "")
+            ptype   = s.get("pattern_type", "")
+            stop    = s.get("stop_price")
+            target  = s.get("target_price")
+            label   = _PATTERN_LABELS.get(ptype, ptype)
+            stop_s  = f"${stop:.2f}"   if stop   else "—"
+            tgt_s   = f"${target:.2f}" if target else "—"
+            notes   = s.get("notes", "")
+            with w_cols[i % 3]:
+                st.markdown(
+                    f'<div style="background:rgba(12,12,30,0.7);border:1px solid rgba(60,60,90,0.4);'
+                    f'border-left:3px solid #7e57c2;border-radius:8px;'
+                    f'padding:10px 14px;margin-bottom:8px;">'
+                    f'<div style="font-size:15px;font-weight:800;color:#c8c8ff;">{ticker}</div>'
+                    f'<div style="font-size:9px;color:#5a5a8a;text-transform:uppercase;'
+                    f'letter-spacing:0.12em;margin-bottom:4px;">{label}</div>'
+                    f'<div style="font-size:11px;color:#6a6a9a;">'
+                    f'Stop {stop_s} &nbsp;·&nbsp; Target {tgt_s}</div>'
+                    + (f'<div style="font-size:10px;color:#3a3a5a;margin-top:4px;">{notes}</div>' if notes else "")
+                    + f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+    # ── DETECTED — very compact, no details ───────────────────────────────────
+    if detected:
+        with st.expander(f"🔍  Detected ({len(detected)}) — early-stage structures", expanded=False):
+            d_items = []
+            for s in detected:
+                tk    = s.get("ticker", "")
+                ptype = s.get("pattern_type", "")
+                d_items.append(f"**{tk}** — {_PATTERN_LABELS.get(ptype, ptype)}")
+            st.markdown(" &nbsp;·&nbsp; ".join(d_items), unsafe_allow_html=True)
 
 
 def show_recommended_view(user_id=""):
@@ -2030,6 +2248,7 @@ for _t in st.session_state.watchlist:
         st.session_state.auto_run = True
         st.session_state.show_recommended = False
         st.session_state.show_positions = False
+        st.session_state.show_chart_analyzer = False
         st.rerun()
 
 selected_ticker = st.session_state.selected_ticker
@@ -2043,6 +2262,7 @@ if selected_ticker:
         st.session_state.analyzed = False
         st.session_state.show_recommended = False
         st.session_state.show_positions = False
+        st.session_state.show_chart_analyzer = False
         st.rerun()
 
 st.sidebar.write("")
@@ -2134,26 +2354,36 @@ st.markdown(
 )
 
 # ── Mobile nav bar ─────────────────────────────────────────────────────────────
-_mc1, _mc2, _mc3, _mc4 = st.columns(4)
+_mc1, _mc2, _mc3, _mc4, _mc5 = st.columns(5)
 with _mc1:
     if st.button("◆  Signals", use_container_width=True, key="mob_rec"):
         st.session_state.show_recommended = not st.session_state.show_recommended
         st.session_state.show_positions = False
         st.session_state.show_charts_watch = False
+        st.session_state.show_chart_analyzer = False
         st.rerun()
 with _mc2:
     if st.button("📈  Positions", use_container_width=True, key="mob_pos"):
         st.session_state.show_positions = not st.session_state.show_positions
         st.session_state.show_recommended = False
         st.session_state.show_charts_watch = False
+        st.session_state.show_chart_analyzer = False
         st.rerun()
 with _mc3:
     if st.button("🔭  Watch", use_container_width=True, key="mob_ctw"):
         st.session_state.show_charts_watch = not st.session_state.show_charts_watch
         st.session_state.show_recommended = False
         st.session_state.show_positions = False
+        st.session_state.show_chart_analyzer = False
         st.rerun()
 with _mc4:
+    if st.button("📐  Patterns", use_container_width=True, key="mob_ca"):
+        st.session_state.show_chart_analyzer = not st.session_state.show_chart_analyzer
+        st.session_state.show_recommended = False
+        st.session_state.show_positions = False
+        st.session_state.show_charts_watch = False
+        st.rerun()
+with _mc5:
     _wl = st.session_state.watchlist
     if _wl:
         _mob_pick = st.selectbox("Stock", ["— Select —"] + _wl, label_visibility="collapsed", key="mob_ticker_sel")
@@ -2163,6 +2393,7 @@ with _mc4:
             st.session_state.auto_run = True
             st.session_state.show_recommended = False
             st.session_state.show_positions = False
+            st.session_state.show_chart_analyzer = False
             st.rerun()
 
 if st.session_state.show_recommended:
@@ -2175,6 +2406,10 @@ if st.session_state.show_positions:
 
 if st.session_state.show_charts_watch:
     show_charts_watch_view()
+    st.stop()
+
+if st.session_state.show_chart_analyzer:
+    show_chart_analyzer_view()
     st.stop()
 
 auto_run = st.session_state.auto_run

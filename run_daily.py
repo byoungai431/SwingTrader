@@ -9,7 +9,6 @@ Scheduled via: ~/Library/LaunchAgents/com.swingtrader.daily.plist
 """
 
 import sys
-import time
 import os
 from datetime import datetime
 
@@ -34,7 +33,7 @@ FLOOR_5STAR    = 0.10  # Exit 5★ if trade drops this % from entry (0 = disable
 MAX_HOLD_DAYS  = 30    # Trading-day hold limit for 4★ trades
 MAX_HOLD_5STAR = 35    # Trading-day hold limit for 5★ trades
 STALE_CUT_DAYS = 12    # Exit after N trading days if gain < 0% (0 = disabled; 5★ exempt)
-IBS_MIN_EXIT   = 0.80  # Exit 5★/5★ MAX when IBS (close near day's high) exceeds this
+IBS_MIN_EXIT   = 0.90  # Exit 5★/5★ MAX when IBS (close near day's high) exceeds this
 
 # ── IBS Entry Filter (mirrors backtest IBS5s25_4s30 config) ───────────────────
 # Require today's bar to close near its LOW before entering — confirms deep
@@ -646,6 +645,14 @@ def run():
                     except Exception:
                         pass
 
+                # Earnings proximity filter — skip BUY within 2 days of earnings (gap-risk)
+                if signal == "BUY" and (is_core_long or is_leveraged):
+                    dte = ind.get("days_to_earnings")
+                    if dte is not None and dte <= 2:
+                        print(f"         📅 Earnings filter: {target_ticker} earns in {dte}d — skipping")
+                        signal = "NO TRADE"
+                        sig["signal"] = "NO TRADE"
+
                 # SELL signals only apply to open BUY positions
                 if signal == "SELL":
                     try:
@@ -701,9 +708,6 @@ def run():
                     print(f"  {target_ticker:<6}  {signal:<8}  {eng:<6}  {stars}  (Base: ${base_price:.2f})")
                 if sig.get("rationale") and signal != "NO TRADE":
                     print(f"         {sig['rationale'][:120]}")
-
-            # Brief pause to stay within API rate limits
-            time.sleep(0.5)
 
         except Exception as e:
             print(f"  {ticker}: ERROR — {e}")
