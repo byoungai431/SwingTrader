@@ -1090,139 +1090,118 @@ def _enter_position_manual_dialog(ticker, default_price, user_id):
 
 # ── Recommended view ────────────────────────────────────────────────────────
 def _render_signal_cards(rows, current_prices, user_id=""):
-    """Render open-signal cards for a list of DB rows."""
-    five_star_max = [r for r in rows if int(r["confidence"]) >= 6]
-    five_star     = [r for r in rows if int(r["confidence"]) == 5]
-    four_star     = [r for r in rows if int(r["confidence"]) == 4]
+    """Render open-signal cards sorted by age (newest first)."""
+    for r in rows:
+        entry = r["price"]
+        cur   = current_prices.get(r["ticker"])
+        conf_html = conf_stars_html(int(r["confidence"]))
 
-    for section_label, icon, section_rows in [
-        ("Tier 1 · High Conviction", "◆", five_star_max),
-        ("Tier 2 · Confident", "◇", five_star),
-        ("Tier 3 · Qualified", "▪", four_star),
-    ]:
-        if not section_rows:
-            continue
-        is_max_section = section_label == "Tier 1 · High Conviction"
-        hdr_color  = "#40E0FF" if is_max_section else "#8888bb"
-        hdr_border = "#003a4a" if is_max_section else "#1c1c4a"
+        if entry and cur:
+            pnl_pct   = (cur - entry) / entry * 100 if r["signal"] == "BUY" else (entry - cur) / entry * 100
+            pnl_color = "#39d98a" if pnl_pct >= 0 else "#ff6b6b"
+            pnl_str   = f'<span style="color:{pnl_color};font-weight:700;">{pnl_pct:+.2f}%</span>'
+            cur_str   = f"${cur:.2f}"
+        else:
+            pnl_str = '<span style="color:#5555aa;">—</span>'
+            cur_str = "—"
+
+        sig_badge = badge("▲ BUY", "green") if r["signal"] == "BUY" else badge("▼ SELL", "red")
+
+        # Staleness badge
+        try:
+            sig_date  = _date.fromisoformat(r["date"])
+            days_old  = (_date.today() - sig_date).days
+            if days_old == 0:
+                age_color, age_label = "#39d98a", "Today"
+            elif days_old == 1:
+                age_color, age_label = "#39d98a", "1d old"
+            elif days_old <= 3:
+                age_color, age_label = "#f9c846", f"{days_old}d old"
+            else:
+                age_color, age_label = "#ff6b6b", f"⚠️ {days_old}d old"
+            staleness_html = (
+                f'<span style="font-size:11px;color:{age_color};background:rgba(0,0,0,0.25);'
+                f'border:1px solid {age_color};padding:1px 7px;border-radius:8px;'
+                f'font-weight:600;margin-left:8px;">{age_label}</span>'
+            )
+        except Exception:
+            staleness_html = ""
+
         st.markdown(
-            f'<div style="font-size:11px;color:{hdr_color};letter-spacing:0.20em;text-transform:uppercase;'
-            f'margin:24px 0 12px 0;padding-bottom:8px;border-bottom:1px solid {hdr_border};">'
-            f'{icon} &nbsp; {section_label} &nbsp;'
-            f'<span style="color:#33336a;">({len(section_rows)} open)</span></div>',
+            f'<div class="panel" style="margin-bottom:6px;">'
+            f'<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px;">'
+            f'<div>'
+            f'<span style="font-size:24px;font-weight:900;color:#c0c0ff;">{r["ticker"]}</span>'
+            f'<span style="font-size:12px;color:#44447a;margin-left:12px;">Signal date: {r["date"]}</span>'
+            f'{staleness_html}'
+            f'</div>'
+            f'<div style="display:flex;gap:8px;align-items:center;">'
+            f'<span style="font-size:16px;letter-spacing:2px;">{conf_html}</span>'
+            f'{sig_badge}'
+            f'</div>'
+            f'</div>'
+            f'<div style="display:flex;gap:20px;flex-wrap:wrap;">'
+            f'<div style="min-width:70px;">'
+            f'<div style="font-size:9px;color:#5555aa;letter-spacing:0.12em;text-transform:uppercase;margin-bottom:3px;">Entry</div>'
+            f'<div style="font-size:17px;color:#c0c0ff;font-weight:600;">${f"{entry:.2f}" if entry else "—"}</div>'
+            f'</div>'
+            f'<div style="min-width:70px;">'
+            f'<div style="font-size:9px;color:#5555aa;letter-spacing:0.12em;text-transform:uppercase;margin-bottom:3px;">Current</div>'
+            f'<div style="font-size:17px;color:#c0c0ff;font-weight:600;">{cur_str}</div>'
+            f'</div>'
+            f'<div style="min-width:70px;">'
+            f'<div style="font-size:9px;color:#5555aa;letter-spacing:0.12em;text-transform:uppercase;margin-bottom:3px;">P&amp;L</div>'
+            f'<div style="font-size:17px;font-weight:600;">{pnl_str}</div>'
+            f'</div>'
+            f'<div style="min-width:80px;">'
+            f'<div style="font-size:9px;color:#5555aa;letter-spacing:0.12em;text-transform:uppercase;margin-bottom:3px;">Stop Loss</div>'
+            f'<div style="font-size:14px;color:#8888bb;">{r["stop_loss"] or "—"}</div>'
+            f'</div>'
+            f'<div style="min-width:80px;">'
+            f'<div style="font-size:9px;color:#5555aa;letter-spacing:0.12em;text-transform:uppercase;margin-bottom:3px;">Target</div>'
+            f'<div style="font-size:14px;color:#8888bb;">{r["target"] or "—"}</div>'
+            f'</div>'
+            f'</div>'
+            + (
+                f'<details class="signal-details" style="margin-top:10px;">'
+                f'<summary>▸ &nbsp; Rationale</summary>'
+                f'<div class="rationale">{r["rationale"] or "—"}</div>'
+                f'</details>'
+                if r["rationale"] else ""
+            )
+            + f'</div>',
             unsafe_allow_html=True
         )
-        for r in section_rows:
-            entry = r["price"]
-            cur   = current_prices.get(r["ticker"])
-            conf_html = conf_stars_html(int(r["confidence"]))
-
-            if entry and cur:
-                pnl_pct   = (cur - entry) / entry * 100 if r["signal"] == "BUY" else (entry - cur) / entry * 100
-                pnl_color = "#39d98a" if pnl_pct >= 0 else "#ff6b6b"
-                pnl_str   = f'<span style="color:{pnl_color};font-weight:700;">{pnl_pct:+.2f}%</span>'
-                cur_str   = f"${cur:.2f}"
-            else:
-                pnl_str = '<span style="color:#5555aa;">—</span>'
-                cur_str = "—"
-
-            sig_badge = badge("▲ BUY", "green") if r["signal"] == "BUY" else badge("▼ SELL", "red")
-
-            # Staleness badge
-            try:
-                sig_date  = _date.fromisoformat(r["date"])
-                days_old  = (_date.today() - sig_date).days
-                if days_old == 0:
-                    age_color, age_label = "#39d98a", "Today"
-                elif days_old == 1:
-                    age_color, age_label = "#39d98a", "1d old"
-                elif days_old <= 3:
-                    age_color, age_label = "#f9c846", f"{days_old}d old"
-                else:
-                    age_color, age_label = "#ff6b6b", f"⚠️ {days_old}d old"
-                staleness_html = (
-                    f'<span style="font-size:11px;color:{age_color};background:rgba(0,0,0,0.25);'
-                    f'border:1px solid {age_color};padding:1px 7px;border-radius:8px;'
-                    f'font-weight:600;margin-left:8px;">{age_label}</span>'
-                )
-            except Exception:
-                staleness_html = ""
-
-            st.markdown(
-                f'<div class="panel" style="margin-bottom:6px;">'
-                f'<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px;">'
-                f'<div>'
-                f'<span style="font-size:24px;font-weight:900;color:#c0c0ff;">{r["ticker"]}</span>'
-                f'<span style="font-size:12px;color:#44447a;margin-left:12px;">Signal date: {r["date"]}</span>'
-                f'{staleness_html}'
-                f'</div>'
-                f'<div style="display:flex;gap:8px;align-items:center;">'
-                f'<span style="font-size:16px;letter-spacing:2px;">{conf_html}</span>'
-                f'{sig_badge}'
-                f'</div>'
-                f'</div>'
-                f'<div style="display:flex;gap:20px;flex-wrap:wrap;">'
-                f'<div style="min-width:70px;">'
-                f'<div style="font-size:9px;color:#5555aa;letter-spacing:0.12em;text-transform:uppercase;margin-bottom:3px;">Entry</div>'
-                f'<div style="font-size:17px;color:#c0c0ff;font-weight:600;">${f"{entry:.2f}" if entry else "—"}</div>'
-                f'</div>'
-                f'<div style="min-width:70px;">'
-                f'<div style="font-size:9px;color:#5555aa;letter-spacing:0.12em;text-transform:uppercase;margin-bottom:3px;">Current</div>'
-                f'<div style="font-size:17px;color:#c0c0ff;font-weight:600;">{cur_str}</div>'
-                f'</div>'
-                f'<div style="min-width:70px;">'
-                f'<div style="font-size:9px;color:#5555aa;letter-spacing:0.12em;text-transform:uppercase;margin-bottom:3px;">P&amp;L</div>'
-                f'<div style="font-size:17px;font-weight:600;">{pnl_str}</div>'
-                f'</div>'
-                f'<div style="min-width:80px;">'
-                f'<div style="font-size:9px;color:#5555aa;letter-spacing:0.12em;text-transform:uppercase;margin-bottom:3px;">Stop Loss</div>'
-                f'<div style="font-size:14px;color:#8888bb;">{r["stop_loss"] or "—"}</div>'
-                f'</div>'
-                f'<div style="min-width:80px;">'
-                f'<div style="font-size:9px;color:#5555aa;letter-spacing:0.12em;text-transform:uppercase;margin-bottom:3px;">Target</div>'
-                f'<div style="font-size:14px;color:#8888bb;">{r["target"] or "—"}</div>'
-                f'</div>'
-                f'</div>'
-                + (
-                    f'<details class="signal-details" style="margin-top:10px;">'
-                    f'<summary>▸ &nbsp; Rationale</summary>'
-                    f'<div class="rationale">{r["rationale"] or "—"}</div>'
-                    f'</details>'
-                    if r["rationale"] else ""
-                )
-                + f'</div>',
-                unsafe_allow_html=True
+        btn_c1, btn_c2 = st.columns([2, 1])
+        with btn_c1:
+            if st.button("🔭  See Analysis", key=f"view_open_{r['id']}_{r['ticker']}", use_container_width=True):
+                st.session_state.selected_ticker = r["ticker"]
+                st.session_state.analyzed = False
+                st.session_state.show_recommended = False
+                st.session_state.results_tickers = []
+                st.session_state.auto_run = True
+                st.rerun()
+        with btn_c2:
+            _already_in = any(
+                p["ticker"] == r["ticker"] and str(p.get("signal_id")) == str(r["id"])
+                for p in (get_my_open_positions(user_id) or [])
             )
-            btn_c1, btn_c2 = st.columns([2, 1])
-            with btn_c1:
-                if st.button("🔭  See Analysis", key=f"view_open_{r['id']}_{r['ticker']}", use_container_width=True):
-                    st.session_state.selected_ticker = r["ticker"]
-                    st.session_state.analyzed = False
-                    st.session_state.show_recommended = False
-                    st.session_state.results_tickers = []
-                    st.session_state.auto_run = True
-                    st.rerun()
-            with btn_c2:
-                _already_in = any(
-                    p["ticker"] == r["ticker"] and str(p.get("signal_id")) == str(r["id"])
-                    for p in (get_my_open_positions(user_id) or [])
-                )
-                if _already_in:
-                    st.button("✅ In Positions", key=f"in_pos_{r['id']}_{r['ticker']}", use_container_width=True, disabled=True)
-                else:
-                    if st.button("📈  Enter Position", key=f"enter_{r['id']}_{r['ticker']}", use_container_width=True):
-                        _default_price = float(current_prices.get(r["ticker"]) or r["price"])
-                        _enter_position_dialog(
-                            ticker=r["ticker"],
-                            signal_id=r["id"],
-                            default_price=_default_price,
-                            confidence=int(r["confidence"]),
-                            stop_loss=r.get("stop_loss"),
-                            target=r.get("target"),
-                            user_id=user_id,
-                        )
+            if _already_in:
+                st.button("✅ In Positions", key=f"in_pos_{r['id']}_{r['ticker']}", use_container_width=True, disabled=True)
+            else:
+                if st.button("📈  Enter Position", key=f"enter_{r['id']}_{r['ticker']}", use_container_width=True):
+                    _default_price = float(current_prices.get(r["ticker"]) or r["price"])
+                    _enter_position_dialog(
+                        ticker=r["ticker"],
+                        signal_id=r["id"],
+                        default_price=_default_price,
+                        confidence=int(r["confidence"]),
+                        stop_loss=r.get("stop_loss"),
+                        target=r.get("target"),
+                        user_id=user_id,
+                    )
 
-            st.markdown('<div style="margin-bottom:14px;"></div>', unsafe_allow_html=True)
+        st.markdown('<div style="margin-bottom:14px;"></div>', unsafe_allow_html=True)
 
 
 def show_charts_watch_view():
