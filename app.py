@@ -1208,9 +1208,9 @@ def _render_signal_cards(rows, current_prices, user_id=""):
                     for p in (get_my_open_positions(user_id) or [])
                 )
                 if _already_in:
-                    st.button("✅ In Positions", key=f"in_pos_{r['ticker']}_{r['date']}", use_container_width=True, disabled=True)
+                    st.button("✅ In Positions", key=f"in_pos_{r['id']}_{r['ticker']}", use_container_width=True, disabled=True)
                 else:
-                    if st.button("📈  Enter Position", key=f"enter_{r['ticker']}_{r['date']}", use_container_width=True):
+                    if st.button("📈  Enter Position", key=f"enter_{r['id']}_{r['ticker']}", use_container_width=True):
                         _default_price = float(current_prices.get(r["ticker"]) or r["price"])
                         _enter_position_dialog(
                             ticker=r["ticker"],
@@ -1885,7 +1885,7 @@ def show_recommended_view(user_id=""):
                     )
                     _, btn_col = st.columns([3, 1])
                     with btn_col:
-                        if st.button("🔭  See Analysis", key=f"view_hist_{r['ticker']}_{r['date']}", use_container_width=True):
+                        if st.button("🔭  See Analysis", key=f"view_hist_{r['id']}_{r['ticker']}", use_container_width=True):
                             st.session_state.selected_ticker = r["ticker"]
                             st.session_state.analyzed = False
                             st.session_state.show_recommended = False
