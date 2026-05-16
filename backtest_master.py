@@ -29,7 +29,7 @@ OUT_DIR  = os.path.join(BASE_DIR, "backtest results")
 os.makedirs(OUT_DIR, exist_ok=True)
 
 # ── Date range ─────────────────────────────────────────────────────────────────
-START_DATE = "2020-01-01"
+START_DATE = "2015-01-01"
 END_DATE   = "2026-01-01"
 
 # ── Shared position sizing ──────────────────────────────────────────────────────
@@ -130,6 +130,7 @@ RG_BULL_MAX_DAYS      = 30     # 30-day Churn
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ENGINE 5 — SECTOR HUNTER config
+RUN_E5 = False   # set True to re-enable
 # ═══════════════════════════════════════════════════════════════════════════════
 E5_TOP_N_SECTORS        = 3      # Hot sectors to qualify (top N by blended RS rank)
 E5_RS_WINDOW_SHORT      = 20     # Short RS lookback (trading days)
@@ -1022,7 +1023,10 @@ all_trades.extend(regime_trades)
 print("Running ENGINE 5: SECTOR HUNTER strategy...")
 sector_trades = []
 
-for _e5_ticker in SW_TICKERS:
+if not RUN_E5:
+    print("  ENGINE 5 deactivated (RUN_E5 = False)")
+
+for _e5_ticker in (SW_TICKERS if RUN_E5 else []):
     if _e5_ticker not in ticker_dfs: continue
     _e5_sector = E5_TICKER_SECTOR.get(_e5_ticker)
     if not _e5_sector or _e5_sector not in E5_SECTOR_ETF_MAP: continue

@@ -124,6 +124,18 @@ if "watchlist" not in st.session_state or st.session_state.get("_wl_user") != us
     st.session_state.watchlist = get_watchlist(user_id) or list(WATCHLIST)
     st.session_state._wl_user  = user_id
 def badge(label, color): return f'<span class="badge badge-{color}">{label}</span>'
+
+def _detect_engine(rationale: str) -> str:
+    r = (rationale or "").lower()
+    if "(e8b)" in r or "(e8)" in r:                                       return "E8"
+    if "(e6)" in r or "range reversion e6" in r:                          return "E6"
+    if "double bottom" in r and "e7" in r:                                return "E7"
+    if "sector hunter" in r:                                              return "E5"
+    if "(e4)" in r or ("regime" in r and "(e1)" not in r):               return "E4"
+    if "(e3)" in r or "leveraged" in r or "shock-bounce" in r or "momentum breakout" in r: return "E3"
+    if "(e2)" in r or "index fade" in r or "blue diamond" in r:          return "E2"
+    if "(e1)" in r:                                                       return "E1"
+    return "E1"
 def stars(n):
     n = int(n)
     if n >= 6:
@@ -1183,7 +1195,7 @@ def _render_signal_cards(rows, current_prices, user_id=""):
             )
             btn_c1, btn_c2 = st.columns([2, 1])
             with btn_c1:
-                if st.button("🔭  See Analysis", key=f"view_open_{r['ticker']}_{r['date']}", use_container_width=True):
+                if st.button("🔭  See Analysis", key=f"view_open_{r['id']}_{r['ticker']}", use_container_width=True):
                     st.session_state.selected_ticker = r["ticker"]
                     st.session_state.analyzed = False
                     st.session_state.show_recommended = False
@@ -1594,7 +1606,7 @@ def show_recommended_view(user_id=""):
                           SELECT 1 FROM signal_dismissals sd
                           WHERE sd.signal_id = signals.id AND sd.user_id = %s
                       )
-                    ORDER BY confidence DESC, date DESC
+                    ORDER BY date DESC, id DESC
                 """, (user_id,))
                 open_rows = cur.fetchall()
             conn.close()

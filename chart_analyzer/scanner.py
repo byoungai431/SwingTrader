@@ -12,9 +12,8 @@ from __future__ import annotations
 import json
 import urllib.request
 import numpy as np
-import pandas as pd
 import yfinance as yf
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from chart_analyzer.history import (
     init_db,
@@ -22,7 +21,6 @@ from chart_analyzer.history import (
     upsert_setup,
     mark_alert_sent,
     invalidate_setup,
-    get_universe_tickers,
 )
 from chart_analyzer.universe import get_universe
 from chart_analyzer.patterns import ALL_PATTERNS
@@ -221,7 +219,7 @@ def _handle_setup_result(
 # Main scan
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_scan(verbose: bool = True) -> dict:
+def run_scan(verbose: bool = True, send_alerts: bool = True) -> dict:
     """
     Full daily chart pattern scan.
 
@@ -230,7 +228,7 @@ def run_scan(verbose: bool = True) -> dict:
     3. Downloads SPY for regime gate.
     4. Downloads per-ticker OHLCV in batches.
     5. Runs all 5 pattern detectors per ticker.
-    6. Upserts DB state, sends Telegram alerts.
+    6. Upserts DB state; optionally sends per-pattern Telegram alerts.
     7. Returns a summary dict.
     """
     init_db()
@@ -321,6 +319,16 @@ def run_scan(verbose: bool = True) -> dict:
                     if to_upsert is None:
                         continue
 
+                    if to_upsert.get("stage") == "CONFIRMED":
+                        _entry  = to_upsert.get("entry_price")
+                        _stop   = to_upsert.get("stop_price")
+                        _target = to_upsert.get("target_price")
+                        if _entry and _stop and _target:
+                            _risk   = _entry - _stop
+                            _reward = _target - _entry
+                            if _risk <= 0 or _reward / _risk < 1.15:
+                                continue
+
                     if to_upsert.get("__invalidate__"):
                         invalidate_setup(to_upsert["id"], reason="stale — no progression")
                         if key in existing_setups:
@@ -346,15 +354,16 @@ def run_scan(verbose: bool = True) -> dict:
                         summary["detected"].append(entry)
 
                     # Send alerts
-                    if send_a:
-                        if _send_alert(to_upsert, "APPROACHING"):
-                            mark_alert_sent(row_id, "APPROACHING")
-                            summary["alerts_sent"] += 1
+                    if send_alerts:
+                        if send_a:
+                            if _send_alert(to_upsert, "APPROACHING"):
+                                mark_alert_sent(row_id, "APPROACHING")
+                                summary["alerts_sent"] += 1
 
-                    if send_c:
-                        if _send_alert(to_upsert, "CONFIRMED"):
-                            mark_alert_sent(row_id, "CONFIRMED")
-                            summary["alerts_sent"] += 1
+                        if send_c:
+                            if _send_alert(to_upsert, "CONFIRMED"):
+                                mark_alert_sent(row_id, "CONFIRMED")
+                                summary["alerts_sent"] += 1
 
                     if verbose and stage in ("APPROACHING", "CONFIRMED"):
                         label = _PATTERN_LABELS.get(ptype, ptype)

@@ -157,14 +157,14 @@ def get_signal(ticker: str, indicators: dict, fundamentals: dict | None = None) 
         rr = (close - stop_price)
         rr_ratio = round((tgt_price - close) / rr, 1) if rr > 0 else "N/A"
         rationale = (
-            f"{star_label} BUY: {strat_str}. "
+            f"{star_label} BUY (E1): {strat_str}. "
             f"Entry ${close:.2f}, ATR stop ${stop_price:.2f}, "
             f"target ${tgt_price:.2f} ({tp_pct*100:.0f}% TP, {rr_ratio}:1 R:R). "
             f"{regime_str}"
         )
     else:
         rationale = (
-            f"{star_label} SELL: {strat_str}. "
+            f"{star_label} SELL (E1): {strat_str}. "
             f"Entry ${close:.2f}, stop ${stop_price:.2f}, "
             f"target ${tgt_price:.2f}. Bear regime (below MA200)."
         )
@@ -193,8 +193,10 @@ def get_signal(ticker: str, indicators: dict, fundamentals: dict | None = None) 
 
 # ── INVERSE MAPS ──────────────────────────────────────────────────────────────
 INDEX_INVERSE_MAP = {
-    "SPY": "SPXU",
-    "QQQ": "SQQQ",
+    "SPY":  "SPXU",
+    "UPRO": "SPXU",   # levered signal source → same execution as SPY fade
+    "QQQ":  "SQQQ",
+    "TQQQ": "SQQQ",   # levered signal source → same execution as QQQ fade
     "SPXU": "SPY",
     "SQQQ": "QQQ",
     "RWM": "IWM",
@@ -231,15 +233,16 @@ def get_index_fade_signal(base_ticker: str, indicators: dict) -> dict:
 
     # Mirrors backtest: requires BOTH RSI >= 80 AND price >= BB Upper (tight filter)
     if rsi >= 80 and bb_upper is not None and close >= bb_upper:
-        _high_conv = rsi >= 85  # mirrors backtest: levered OR RSI>=85 gets extreme TP
+        _levered = base_ticker in {"UPRO", "TQQQ", "SPXU", "SQQQ"}
+        _high_conv = _levered or rsi >= 85  # mirrors backtest: levered OR RSI>=85 gets extreme TP
         stars = 6  # 5 star max (blue diamond) — RSI 80+ AND upper BB is max conviction for E2
         strategies = [f"Overbought Fade (RSI {rsi:.1f} ≥ 80)", "BB Upper Band Breach"]
 
-        tp_pct = 0.10 if _high_conv else 0.05
-        stop_pct = 0.05
+        tp_pct   = 0.25 if _high_conv else 0.15   # backtest: IX_TP_EXTREME=0.25, IX_TP_BASE=0.15
+        stop_pct = 0.15                            # backtest: IX_STOP_PCT=0.15
 
         rationale = (
-            f"5 star max (blue diamond) INDEX FADE: {base_ticker} Overbought. "
+            f"5 star max (blue diamond) INDEX FADE (E2): {base_ticker} Overbought. "
             f"BUY {inverse_ticker}. Target {tp_pct*100:.0f}%, Stop {stop_pct*100:.0f}%."
         )
 
@@ -304,7 +307,7 @@ def get_leveraged_signal(base_ticker: str, indicators: dict) -> dict:
             "confidence_stars":   stars,
             "strategies_aligned": strategies,
             "fundamentals_bonus": False,
-            "rationale":          f"5★ MAX DIAMOND LEVERAGED SHOCK-BOUNCE: {base_ticker} Capitulation. BUY {lev_ticker}. 10% Trailing Stop triggers at +35%. Hard Floor Stop: -15%. Cash-out target: Exit when {lev_ticker} RSI > 70.",
+            "rationale":          f"5★ MAX DIAMOND LEVERAGED SHOCK-BOUNCE (E3): {base_ticker} Capitulation. BUY {lev_ticker}. 10% Trailing Stop triggers at +35%. Hard Floor Stop: -15%. Cash-out target: Exit when {lev_ticker} RSI > 70.",
             "entry_zone":         "Market Open",
             "stop_loss":          "-15%",
             "target":             "Trail > +35%",
@@ -325,7 +328,7 @@ def get_leveraged_signal(base_ticker: str, indicators: dict) -> dict:
                     "confidence_stars":   5,
                     "strategies_aligned": strategies,
                     "fundamentals_bonus": False,
-                    "rationale":          f"5★ LEVERAGED MOMENTUM BREAKOUT: {base_ticker} at 20-Day High with {rel_vol:.1f}x Vol. BUY {lev_ticker}. 15% Continuous Trailing Stop. Uncapped target.",
+                    "rationale":          f"5★ LEVERAGED MOMENTUM BREAKOUT (E3): {base_ticker} at 20-Day High with {rel_vol:.1f}x Vol. BUY {lev_ticker}. 15% Continuous Trailing Stop. Uncapped target.",
                     "entry_zone":         "Market Open",
                     "stop_loss":          "-15% Trail",
                     "target":             "Uncapped",
@@ -391,7 +394,7 @@ def get_regime_signal(spy_indicators: dict) -> dict:
         ],
         "fundamentals_bonus": False,
         "rationale": (
-            f"5 star (gold stars) REGIME MOMENTUM: SPY confirmed bull + RSI pullback. BUY UPRO. "
+            f"5 star (gold stars) REGIME MOMENTUM (E4): SPY confirmed bull + RSI pullback. BUY UPRO. "
             f"35% TP, 17% trail trigger → 10% trail, 40% floor stop, 30-day churn. "
             f"Regime exits if SPY closes below MA50 for 5 consecutive days."
         ),
@@ -531,7 +534,7 @@ def get_sector_hunter_signal(ticker: str, sector: str, indicators: dict,
         ],
         "fundamentals_bonus": False,
         "rationale": (
-            f"{'5★ MAX' if stars >= 6 else '5★' if stars >= 5 else '4★'} SECTOR HUNTER: {sector} is top-{_E5_TOP_N} "
+            f"{'5★ MAX' if stars >= 6 else '5★' if stars >= 5 else '4★'} SECTOR HUNTER (E5): {sector} is top-{_E5_TOP_N} "
             f"by relative strength. {ticker} RSI {rsi:.1f} — oversold within leading sector. "
             f"Entry ${close:.2f}, TP +25%, Hard Stop -12%, Max Hold 30d."
         ),
@@ -765,7 +768,7 @@ def get_chop_signal(ticker: str, df: "pd.DataFrame", spy_df: "pd.DataFrame") -> 
         ],
         "fundamentals_bonus": False,
         "rationale": (
-            f"{'5★' if is_t1 else '3★'} RANGE REVERSION E6: {ticker} BB mean-reversion. "
+            f"{'5★' if is_t1 else '3★'} RANGE REVERSION (E6): {ticker} BB mean-reversion. "
             f"{path_str}. ADX {adx_val:.1f} ({adx_streak}-bar chop), "
             f"RSI {rsi_val:.1f}, Vol {rel_vol:.1f}x. "
             f"Entry ${cur_close:.2f}, Stop -6% (${stop_price:.2f}), "
@@ -785,7 +788,7 @@ E7_LOOKBACK        = 150
 E7_ORDER_W1        = 10
 E7_MIN_SEP         = 15
 E7_ZONE_PCT        = 0.05
-E7_CANCEL_PCT      = 0.06
+E7_CANCEL_PCT      = 0.04
 E7_TOUCH_PCT       = 0.01
 E7_TOUCH_WINDOW    = 5
 E7_NECKLINE_MIN    = 0.03

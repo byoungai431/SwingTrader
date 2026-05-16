@@ -214,14 +214,42 @@ def save_signal(ticker: str, sig: dict, price: float):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            # Skip if the same signal type already logged for this ticker today
-            cur.execute("""
-                SELECT id FROM signals
-                WHERE ticker = %s AND signal = %s AND date = %s
-                LIMIT 1
-            """, (ticker, sig.get("signal"), today))
-            if cur.fetchone():
-                return
+            # For SELL: skip if already logged today (prevent double-sell)
+            if sig.get("signal") == "SELL":
+                cur.execute("""
+                    SELECT id FROM signals
+                    WHERE ticker = %s AND signal = 'SELL' AND date = %s
+                    LIMIT 1
+                """, (ticker, today))
+                if cur.fetchone():
+                    return
+            # Block duplicate open BUY for the same ticker + engine
+            if sig.get("signal") == "BUY":
+                _rat = (sig.get("rationale") or "").lower()
+                if "(e8b)" in _rat or "(e8)" in _rat:
+                    _eng_tag = "E8"
+                elif "(e6)" in _rat or "range reversion e6" in _rat:
+                    _eng_tag = "E6"
+                elif "double bottom" in _rat and "e7" in _rat:
+                    _eng_tag = "E7"
+                elif "sector hunter" in _rat:
+                    _eng_tag = "E5"
+                elif "(e4)" in _rat or ("regime" in _rat and "(e1)" not in _rat):
+                    _eng_tag = "E4"
+                elif "(e3)" in _rat or "leveraged" in _rat or "shock-bounce" in _rat or "momentum breakout" in _rat:
+                    _eng_tag = "E3"
+                elif "(e2)" in _rat or "index fade" in _rat or "blue diamond" in _rat:
+                    _eng_tag = "E2"
+                else:
+                    _eng_tag = "E1"
+                cur.execute("""
+                    SELECT id FROM signals
+                    WHERE ticker = %s AND signal = 'BUY' AND exit_price IS NULL
+                      AND rationale ILIKE %s
+                    LIMIT 1
+                """, (ticker, f"%{_eng_tag}%"))
+                if cur.fetchone():
+                    return
             # Auto-close any open BUY from a prior date when a SELL is confirmed
             if sig.get("signal") == "SELL":
                 cur.execute("""
@@ -246,6 +274,47 @@ def save_signal(ticker: str, sig: dict, price: float):
                 price,
             ))
         conn.commit()
+    finally:
+        conn.close()
+
+
+def deduplicate_open_signals():
+    """Delete newer duplicates where the same ticker + engine has >1 open BUY. Keeps the oldest entry."""
+    def _engine(rationale):
+        r = (rationale or "").lower()
+        if "(e8b)" in r or "(e8)" in r:                                       return "E8"
+        if "(e6)" in r or "range reversion e6" in r:                          return "E6"
+        if "double bottom" in r and "e7" in r:                                return "E7"
+        if "sector hunter" in r:                                              return "E5"
+        if "regime" in r:                                                     return "E4"
+        if "leveraged" in r or "shock-bounce" in r or "momentum breakout" in r: return "E3"
+        if "index fade" in r or "blue diamond" in r:                          return "E2"
+        return "E1"
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, ticker, rationale, date
+                FROM signals
+                WHERE signal = 'BUY' AND exit_price IS NULL
+                ORDER BY ticker, date ASC
+            """)
+            rows = cur.fetchall()
+
+        groups: dict[tuple, list] = {}
+        for row_id, ticker, rationale, date in rows:
+            key = (ticker, _engine(rationale))
+            groups.setdefault(key, []).append(row_id)
+
+        to_delete = [row_id for ids in groups.values() if len(ids) > 1 for row_id in ids[1:]]
+
+        if to_delete:
+            with conn.cursor() as cur:
+                cur.execute(f"DELETE FROM signals WHERE id = ANY(%s)", (to_delete,))
+            conn.commit()
+
+        return to_delete
     finally:
         conn.close()
 

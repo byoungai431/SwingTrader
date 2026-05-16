@@ -151,12 +151,12 @@ def write_backtest_stats(results: list):
                   last_run            = EXCLUDED.last_run
             """,
             (
-                r["pattern_type"],
-                r["profit_factor"],
-                r["win_rate"],
-                r["avg_bars_to_target"],
-                r["sample_size"],
-                r["date_range"],
+                str(r["pattern_type"]),
+                float(r["profit_factor"]),
+                float(r["win_rate"]),
+                int(r["avg_bars_to_target"]),
+                int(r["sample_size"]),
+                str(r["date_range"]),
                 int(r["passed"]),
                 now,
             ),

@@ -22,8 +22,10 @@ from signal_engine import (get_signal, get_index_fade_signal, get_leveraged_sign
                            compute_hot_sectors, get_sector_hunter_signal, E5_SECTOR_ETF_MAP,
                            get_chop_signal, E6_CONSEC_LOSS_LIMIT, E6_LOSS_COOLDOWN_DAYS,
                            get_pattern_signal, scan_e7_watching)
-from history import save_signal, get_performance_stats, get_conn, save_e7_watching
+from history import save_signal, get_performance_stats, get_conn, save_e7_watching, deduplicate_open_signals
 from notify import send_telegram, send_daily_summary, send_daily_telegram, send_push, send_exit_alert
+from chart_analyzer.scanner import run_scan
+from chart_analyzer.history import get_active_setups as e8_get_active_setups
 
 # ── Set to False to fall back to watchlist only ───────────────────────────────
 USE_SP500 = True
@@ -57,9 +59,10 @@ def _get_sp500_tickers():
                       "Chrome/120.0.0.0 Safari/537.36"
     })
     try:
+        from io import StringIO
         with urllib.request.urlopen(req) as resp:
             html = resp.read().decode("utf-8")
-        tickers = pd.read_html(html)[0]["Symbol"].tolist()
+        tickers = pd.read_html(StringIO(html))[0]["Symbol"].tolist()
         # Normalize BRK.B → BRK-B style used by yfinance
         return [t.replace(".", "-") for t in tickers]
     except Exception as e:
@@ -76,9 +79,10 @@ def _get_sp500_sector_map() -> dict:
                       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     })
     try:
+        from io import StringIO
         with urllib.request.urlopen(req) as resp:
             html = resp.read().decode("utf-8")
-        table = pd.read_html(html)[0]
+        table = pd.read_html(StringIO(html))[0]
         table["Symbol"] = table["Symbol"].str.replace(".", "-", regex=False)
         return dict(zip(table["Symbol"], table["GICS Sector"]))
     except Exception as e:
@@ -300,18 +304,15 @@ def _update_peak_price(signal_id: int, new_peak: float):
 def _detect_engine(rationale: str) -> str:
     """Identify which engine generated a signal from its rationale text."""
     r = (rationale or "").lower()
-    if "range reversion e6" in r:
-        return "E6"
-    if "double bottom" in r and "e7" in r:
-        return "E7"
-    if "sector hunter" in r:
-        return "E5"
-    if "regime" in r:
-        return "E4"
-    if "leveraged" in r or "shock-bounce" in r or "momentum breakout" in r:
-        return "E3"
-    if "index fade" in r or "blue diamond" in r:
-        return "E2"
+    if "(e6)" in r or "range reversion e6" in r:                          return "E6"
+    if "double bottom" in r and "e7" in r:                                return "E7"
+    if "(e8b)" in r:                                                       return "E8B"
+    if "(e8)" in r:                                                        return "E8"
+    if "sector hunter" in r:                                              return "E5"
+    if "(e4)" in r or ("regime" in r and "(e1)" not in r):               return "E4"
+    if "(e3)" in r or "leveraged" in r or "shock-bounce" in r or "momentum breakout" in r: return "E3"
+    if "(e2)" in r or "index fade" in r or "blue diamond" in r:          return "E2"
+    if "(e1)" in r:                                                       return "E1"
     return "E1"
 
 
@@ -328,7 +329,9 @@ _ENGINE_PARAMS = {
     "E4": {"trail_trigger": 0.17, "trail_distance": 0.10, "max_hold": 90, "max_hold_5star": 90, "stale_cut": None, "stale_unconditional": False},
     "E5": {"trail_trigger": 0.08, "trail_distance": 0.04, "max_hold": 30, "max_hold_5star": 30, "stale_cut": 15,  "stale_unconditional": False},
     "E6": {"trail_trigger": 0.08, "trail_distance": 0.04, "max_hold": 25, "max_hold_5star": 25, "stale_cut": 12,  "stale_unconditional": True},
-    "E7": {"trail_trigger": 0.07, "trail_distance": 0.03, "max_hold": 45, "max_hold_5star": 45, "stale_cut": 35,  "stale_unconditional": False},
+    "E7":  {"trail_trigger": 0.07, "trail_distance": 0.03, "max_hold": 45, "max_hold_5star": 45, "stale_cut": 35,  "stale_unconditional": False},
+    "E8":  {"trail_trigger": None, "trail_distance": None, "max_hold": 40, "max_hold_5star": 40, "stale_cut": None, "stale_unconditional": False},
+    "E8B": {"trail_trigger": None, "trail_distance": None, "max_hold": 60, "max_hold_5star": 60, "stale_cut": None, "stale_unconditional": False},
 }
 
 
@@ -478,6 +481,11 @@ def run():
         sys.exit(1)
 
     today    = datetime.now().strftime("%Y-%m-%d")
+
+    removed = deduplicate_open_signals()
+    if removed:
+        print(f"  🧹 Dedup: removed {len(removed)} duplicate open signal(s): {removed}")
+
     universe = _get_sp500_tickers() if USE_SP500 else list(WATCHLIST)
     
     # Inject base tickers for Engine 2 & 3
@@ -485,6 +493,12 @@ def run():
     for bt in base_tickers:
         if bt not in universe:
             universe.append(bt)
+
+    # Force-include S&P 500 tickers that may be missed by the Wikipedia scrape
+    force_include = ["COHR"]
+    for ft in force_include:
+        if ft not in universe:
+            universe.append(ft)
 
     source   = f"S&P 500 + Indices ({len(universe)} items)" if USE_SP500 else f"Watchlist ({len(universe)} stocks)"
 
@@ -626,9 +640,11 @@ def run():
                     sig["signal"] = "NO TRADE"
 
                 # IBS entry filter — mirrors backtest: use YESTERDAY's IBS on base ticker
-                # Applies to Engine 1 (core swing) and Engine 3 (leveraged), not Engine 2 (inverse ETF fade)
+                # Applies to Engine 1 (core swing) and Engine 3 (leveraged) only.
+                # E6/E7 are pattern-based and do not use IBS as an entry gate.
                 is_leveraged = target_ticker in ["UPRO", "TQQQ", "TSLL", "NVDL"]
-                apply_ibs = is_core_long or is_leveraged
+                is_e6_or_e7  = any(k in sig.get("rationale", "") for k in ("DOUBLE BOTTOM", "RANGE REVERSION", "E6", "E7"))
+                apply_ibs = (is_core_long or is_leveraged) and not is_e6_or_e7
                 if signal == "BUY" and IBS_ENTRY_FILTER and apply_ibs:
                     try:
                         h = float(df["High"].iloc[-2])
@@ -677,6 +693,27 @@ def run():
                     sig["signal"] = "NO TRADE"
 
                 if signal in ("BUY", "SELL"):
+                    # Block duplicate: one open position per ticker per engine
+                    if signal == "BUY":
+                        _eng = _detect_engine(sig.get("rationale", ""))
+                        try:
+                            conn = get_conn()
+                            with conn.cursor() as _dc:
+                                _dc.execute(
+                                    "SELECT id FROM signals WHERE ticker=%s AND signal='BUY' AND exit_price IS NULL AND rationale ILIKE %s LIMIT 1",
+                                    (target_ticker, f"%{_eng}%")
+                                )
+                                _already_open = _dc.fetchone() is not None
+                            conn.close()
+                        except Exception as _dup_err:
+                            print(f"         ⚠️  Duplicate guard DB error for {target_ticker}: {_dup_err} — allowing signal")
+                            _already_open = False
+                        if _already_open:
+                            print(f"         ⛔ {target_ticker} already has an open {_eng} position — skipping duplicate")
+                            signal = "NO TRADE"
+                            sig["signal"] = "NO TRADE"
+
+                if signal in ("BUY", "SELL"):
                     # If target ticker is mapped dynamically (e.g. SPY -> UPRO), we must fetch UPRO's price globally
                     if target_ticker != ticker:
                         try:
@@ -714,10 +751,86 @@ def run():
             results["ERROR"].append(ticker)
 
     save_e7_watching(e7_watching_setups)
+
+    # ── Engine 8: Chart Pattern Engine (top-100 S&P 500) ─────────────────────
+    print(f"\n{'─'*60}")
+    print(f"  E8 Chart Pattern Engine scan starting...")
+    e8_signals_saved = 0
+    try:
+        run_scan(verbose=False, send_alerts=False)
+        today_e8 = datetime.utcnow().strftime("%Y-%m-%d")
+        confirmed_setups = [
+            s for s in e8_get_active_setups(stage="CONFIRMED")
+            if (s.get("confirmed_at") or "")[:10] == today_e8
+        ]
+        _E8_PATTERN_LABELS = {
+            "InvHnS": "Inv Head & Shoulders", "AscTriangle": "Ascending Triangle",
+            "CupHandle": "Cup & Handle", "BullFlag": "Bull Flag", "FallingWedge": "Falling Wedge",
+        }
+        # Fetch current prices to guard against stale breakouts (>2% above entry = skip)
+        _e8_tickers = [s.get("ticker") for s in confirmed_setups if s.get("ticker")]
+        _e8_cur_prices = {}
+        if _e8_tickers:
+            try:
+                _e8_raw = yf.download(_e8_tickers, period="2d", auto_adjust=True,
+                                      progress=False, threads=True)
+                for _t in _e8_tickers:
+                    try:
+                        _col = _e8_raw["Close"] if len(_e8_tickers) == 1 else _e8_raw["Close"][_t]
+                        _e8_cur_prices[_t] = float(_col.dropna().iloc[-1])
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        for setup in confirmed_setups:
+            _tk, _ptype = setup.get("ticker", ""), setup.get("pattern_type", "")
+            _entry = setup.get("entry_price")
+            _stop  = setup.get("stop_price")
+            _target = setup.get("target_price")
+            if not (_entry and _stop and _target):
+                continue
+            _entry, _stop, _target = float(_entry), float(_stop), float(_target)
+            _risk, _reward = _entry - _stop, _target - _entry
+            if _risk <= 0 or (_reward / _risk) < 1.15:
+                continue
+            # Skip if price has moved >2% from entry in either direction (stale breakout)
+            _cur = _e8_cur_prices.get(_tk)
+            if _cur and abs(_cur - _entry) / _entry > 0.02:
+                print(f"    ⏭  E8 SKIP {_tk:<6} — price moved {(_cur/_entry-1)*100:+.1f}% from entry")
+                continue
+            _vr = setup.get("vol_ratio")
+            _vr_str = f" vol {_vr:.1f}x" if _vr else ""
+            _label = _E8_PATTERN_LABELS.get(_ptype, _ptype)
+            _notes = (setup.get("notes") or "").strip()
+            _etag = "(E8B)" if _ptype == "InvHnS" else "(E8)"
+            _conf = 6 if _ptype == "InvHnS" else 5
+            sig = {
+                "signal":           "BUY",
+                "confidence_stars": _conf,
+                "rationale":        f"Chart pattern breakout: {_label}{_vr_str} {_etag}. Stop ${_stop:.2f}, Target ${_target:.2f}. {_notes}".strip(),
+                "entry_zone":       f"${_entry:.2f}",
+                "stop_loss":        f"${_stop:.2f}",
+                "target":           f"${_target:.2f}",
+            }
+            save_signal(_tk, sig, _entry)
+            results["BUY"].append(_tk)
+            notify_signals.append({"ticker": _tk, "signal": "BUY", "confidence": _conf,
+                "price": _entry, "entry_zone": sig["entry_zone"],
+                "stop_loss": sig["stop_loss"], "target": sig["target"],
+                "rationale": sig["rationale"]})
+            e8_signals_saved += 1
+            print(f"    ✅ {_etag} BUY: {_tk:<6} {_label} | Entry ${_entry:.2f} Stop ${_stop:.2f} Target ${_target:.2f}")
+    except Exception as _e8_err:
+        print(f"    ⚠️  E8 scan error: {_e8_err}")
+        results["ERROR"].append("E8_SCAN")
+    # ── End E8 ────────────────────────────────────────────────────────────────
+
     print(f"\n{'─'*60}")
     print(f"  Universe : {source}")
     print(f"  Skipped  : {skipped} (already run today)")
     print(f"  E7 Watch : {len(e7_watching_setups)} setups saved")
+    print(f"  E8 Sigs  : {e8_signals_saved} BUY signal(s) saved")
     print(f"  BUY      ({len(results['BUY'])}): {', '.join(results['BUY']) or '—'}")
     print(f"  SELL     ({len(results['SELL'])}): {', '.join(results['SELL']) or '—'}")
     print(f"  ERRORS   ({len(results['ERROR'])}): {', '.join(results['ERROR']) or '—'}")
