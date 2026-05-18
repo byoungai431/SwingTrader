@@ -63,7 +63,7 @@ ANTHROPIC_API_KEY  = _secret("ANTHROPIC_API_KEY",  "")
 # Email (Gmail SMTP)
 EMAIL_ENABLED      = _secret("EMAIL_ENABLED",      True)
 EMAIL_FROM         = _secret("EMAIL_FROM",          "byoungai431@gmail.com")
-EMAIL_APP_PASSWORD = _secret("EMAIL_APP_PASSWORD",  "oxtc hhpf thca lqfp")
+EMAIL_APP_PASSWORD = _secret("EMAIL_APP_PASSWORD",  "")
 EMAIL_TO           = _secret("EMAIL_TO",            "byoungai431@gmail.com")
 
 # Push notifications via ntfy.sh
@@ -72,5 +72,5 @@ NTFY_TOPIC   = _secret("NTFY_TOPIC",   "swingtrader-yourname")
 
 # Telegram Bot notifications
 TELEGRAM_ENABLED    = _secret("TELEGRAM_ENABLED",    True)
-TELEGRAM_BOT_TOKEN  = _secret("TELEGRAM_BOT_TOKEN",  "8652669850:AAFn6TFReNYLcW4n1u9DlFSfHipOaTIVkqQ")
+TELEGRAM_BOT_TOKEN  = _secret("TELEGRAM_BOT_TOKEN",  "")
 TELEGRAM_CHAT_ID    = _secret("TELEGRAM_CHAT_ID",    "7468464890")
