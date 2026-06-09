@@ -1,6 +1,8 @@
+import base64
 import json
 import math
 import os
+import urllib.parse
 import psycopg2
 import psycopg2.extras
 import subprocess
@@ -74,15 +76,70 @@ def _get_hot_sectors_cached() -> set:
 # Auto-refresh every 2 minutes so new scan results appear without manual reload
 st_autorefresh(interval=2 * 60 * 1000, key="autorefresh")
 
-# ── Auth gate ───────────────────────────────────────────────────────────────────
-try:
-    _st_user = getattr(st, "user", None) or getattr(st, "experimental_user", None)
-    _auth_enabled = _st_user is not None and hasattr(_st_user, "is_logged_in")
-except Exception:
-    _st_user = None
-    _auth_enabled = False
+# ── Auth gate (Google OAuth via query params — bypasses st.login() Cloud bug) ──
+def _get_google_creds() -> dict | None:
+    try:
+        return {
+            "client_id":     st.secrets["auth"]["google"]["client_id"],
+            "client_secret": st.secrets["auth"]["google"]["client_secret"],
+            "redirect_uri":  st.secrets["auth"]["redirect_uri"],
+        }
+    except (KeyError, AttributeError):
+        return None
 
-if _auth_enabled and not _st_user.is_logged_in:
+def _build_google_auth_url(client_id: str, redirect_uri: str) -> str:
+    params = {
+        "client_id":     client_id,
+        "redirect_uri":  redirect_uri,
+        "response_type": "code",
+        "scope":         "openid email profile",
+        "access_type":   "offline",
+        "prompt":        "select_account",
+    }
+    return "https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode(params)
+
+def _exchange_google_code(code: str, client_id: str, client_secret: str, redirect_uri: str) -> dict:
+    try:
+        import httpx
+        r = httpx.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "code":          code,
+                "client_id":     client_id,
+                "client_secret": client_secret,
+                "redirect_uri":  redirect_uri,
+                "grant_type":    "authorization_code",
+            },
+            timeout=10,
+        )
+        return r.json()
+    except Exception:
+        return {}
+
+def _email_from_id_token(id_token: str) -> str | None:
+    try:
+        payload = id_token.split(".")[1]
+        payload += "=" * (4 - len(payload) % 4)
+        info = json.loads(base64.b64decode(payload))
+        return info.get("email")
+    except Exception:
+        return None
+
+_oauth_code = st.query_params.get("code")
+if _oauth_code and "user_email" not in st.session_state:
+    _creds = _get_google_creds()
+    if _creds:
+        _token_data = _exchange_google_code(_oauth_code, **_creds)
+        _id_token = _token_data.get("id_token")
+        if _id_token:
+            _email = _email_from_id_token(_id_token)
+            if _email:
+                st.session_state["user_email"] = _email
+    st.query_params.clear()
+    st.rerun()
+
+if "user_email" not in st.session_state:
+    _creds = _get_google_creds()
     st.markdown(
         '<div style="display:flex;flex-direction:column;align-items:center;'
         'justify-content:center;height:80vh;gap:24px;">'
@@ -92,16 +149,14 @@ if _auth_enabled and not _st_user.is_logged_in:
         '</div>',
         unsafe_allow_html=True,
     )
-    col1, col2, col3 = st.columns([1, 1, 1])
-    with col2:
-        if st.button("Sign in with Google", use_container_width=True):
-            st.login("google")
+    if _creds:
+        _auth_url = _build_google_auth_url(_creds["client_id"], _creds["redirect_uri"])
+        _col1, _col2, _col3 = st.columns([1, 1, 1])
+        with _col2:
+            st.link_button("Sign in with Google", _auth_url, use_container_width=True)
     st.stop()
 
-if _auth_enabled and _st_user is not None:
-    user_id: str = getattr(_st_user, "email", None) or getattr(_st_user, "name", None) or "unknown"
-else:
-    user_id: str = "unknown"
+user_id: str = st.session_state.get("user_email", "unknown")
 
 ADMIN_EMAIL = "byoungai431@gmail.com"
 is_admin = user_id == ADMIN_EMAIL
@@ -2157,13 +2212,15 @@ st.sidebar.markdown(
 st.sidebar.divider()
 
 # ── User info + logout ─────────────────────────────────────────────────────────
-_display_name = (getattr(_st_user, "name", None) or getattr(_st_user, "email", None) or "User") if _st_user else "User"
+_display_name = user_id if user_id != "unknown" else "User"
 st.sidebar.markdown(
     f'<div style="font-size:11px;color:#5555aa;text-align:center;padding:2px 0 6px 0;">'
     f'Signed in as<br><span style="color:#c0c0ff;font-weight:600;">{_display_name}</span></div>',
     unsafe_allow_html=True,
 )
-st.sidebar.button("Sign out", on_click=st.logout, use_container_width=True)
+if st.sidebar.button("Sign out", use_container_width=True):
+    st.session_state.pop("user_email", None)
+    st.rerun()
 st.sidebar.divider()
 
 if is_demo_mode():
