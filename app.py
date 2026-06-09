@@ -94,7 +94,8 @@ if _auth_enabled and not _st_user.is_logged_in:
     )
     col1, col2, col3 = st.columns([1, 1, 1])
     with col2:
-        st.button("Sign in with Google", on_click=st.login, args=("google",), use_container_width=True)
+        if st.button("Sign in with Google", use_container_width=True):
+            st.login("google")
     st.stop()
 
 if _auth_enabled and _st_user is not None:
