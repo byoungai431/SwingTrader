@@ -20,11 +20,13 @@ try:
         EMAIL_ENABLED, EMAIL_FROM, EMAIL_APP_PASSWORD, EMAIL_TO,
         NTFY_ENABLED, NTFY_TOPIC,
         TELEGRAM_ENABLED, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
+        TELEGRAM_GROUP_CHAT_ID,
     )
 except ImportError:
-    EMAIL_ENABLED    = False
-    NTFY_ENABLED     = False
-    TELEGRAM_ENABLED = False
+    EMAIL_ENABLED          = False
+    NTFY_ENABLED           = False
+    TELEGRAM_ENABLED       = False
+    TELEGRAM_GROUP_CHAT_ID = ""
 
 
 # ── Daily summary email ───────────────────────────────────────────────────────
@@ -74,31 +76,52 @@ _CSS = """
 """
 
 
-def _stars_html(conf: int) -> str:
-    """Return a styled HTML star span. Tiers: 6=5★MAX (blue diamond), 5=5★ (gold), 4=4★ (silver), 3=3★ (bronze)."""
+def _tier_label(conf: int) -> str:
+    """Text tier label for Telegram/push, matching the app's tier badges (app.py stars())."""
+    conf = int(conf or 0)
     if conf >= 6:
-        return '<span class="stars-max">💎💎💎💎💎</span>'
+        return "🔷 TIER 1 · High Conviction"
     if conf >= 5:
-        return '<span class="stars">★★★★★</span>'
+        return "🟡 TIER 2 · Confident"
     if conf >= 4:
-        return '<span class="stars-4">★★★★☆</span>'
-    return '<span class="stars-4" style="color:#cd7f32;">★★★☆☆</span>'
+        return "⚪ TIER 3 · Qualified"
+    if conf >= 3:
+        return "🟤 TIER 4 · Range Reversion"
+    return "—"
 
 
-def _stars_text(conf: int) -> str:
-    """Return an emoji/text star string for Telegram and push notifications."""
+def _tier_html(conf: int) -> str:
+    """Styled HTML tier badge for the email, matching the app's tier colors (app.py conf_stars_html())."""
+    conf = int(conf or 0)
     if conf >= 6:
-        return "💎💎💎💎💎"
+        color, text = "#40E0FF", "TIER 1 · High Conviction"
+    elif conf >= 5:
+        color, text = "#f9c846", "TIER 2 · Confident"
+    elif conf >= 4:
+        color, text = "#a8a8c0", "TIER 3 · Qualified"
+    elif conf >= 3:
+        color, text = "#cd7f32", "TIER 4 · Range Reversion"
+    else:
+        return '<span style="color:#5a5a7a;font-weight:600;">—</span>'
+    return (f'<span style="color:{color};font-weight:800;letter-spacing:1.5px;'
+            f'font-size:12px;">{text}</span>')
+
+
+def _confidence_caveat(conf: int) -> str:
+    """One-line reason a sub-Tier-1 signal isn't maximal conviction. Empty for Tier 1 (conf>=6)."""
+    conf = int(conf or 0)
+    if conf >= 6:
+        return ""
     if conf >= 5:
-        return "⭐⭐⭐⭐⭐"
+        return "⚠️ Not Tier 1 — strong setup but not the deepest-oversold / highest-conviction trigger."
     if conf >= 4:
-        return "🔘🔘🔘🔘☆"
-    return "🔶🔶🔶☆☆"
+        return "⚠️ Tier 3 — qualifying signal; fewer confirming conditions aligned."
+    return "⚠️ Tier 4 — range/mean-reversion setup; lower expected edge, size accordingly."
 
 
 def _signal_card_html(s: dict) -> str:
     conf   = s.get("confidence", 0) or 0
-    stars  = _stars_html(conf)
+    tier   = _tier_html(conf)
     sig    = s.get("signal", "")
     cls    = "buy" if sig == "BUY" else "sell"
     price  = f"${s['price']:.2f}" if s.get("price") else "—"
@@ -107,12 +130,17 @@ def _signal_card_html(s: dict) -> str:
     rat    = html.escape(s.get("rationale", "") or "")
 
     rat_block = f'<div class="rationale">{rat}</div>' if rat else ""
+    # Confidence caveat for sub-Tier-1 BUYs
+    caveat = _confidence_caveat(conf) if sig == "BUY" else ""
+    if caveat:
+        rat_block += (f'<div class="rationale" style="color:#f9c846;">'
+                      f'{html.escape(caveat)}</div>')
     return f"""
 <div class="card">
   <div class="card-top">
     <span class="ticker">{s['ticker']}</span>
     <span class="badge {cls}">{sig}</span>
-    {stars}
+    {tier}
   </div>
   <div class="meta">
     <b>Entry:</b> {price} &nbsp;|&nbsp; <b>Stop:</b> {html.escape(str(stop))} &nbsp;|&nbsp; <b>Target:</b> {html.escape(str(target))}
@@ -124,7 +152,7 @@ def _signal_card_html(s: dict) -> str:
 def _open_position_card_html(r: dict) -> str:
     """Card for an open BUY position with live P&L."""
     conf    = r.get("confidence", 0) or 0
-    stars   = _stars_html(conf)
+    tier    = _tier_html(conf)
     entry   = r.get("price", 0) or 0
     stop    = r.get("stop_loss", "—") or "—"
     target  = r.get("target", "—") or "—"
@@ -146,7 +174,7 @@ def _open_position_card_html(r: dict) -> str:
   <div class="card-top">
     <span class="ticker">{r['ticker']}</span>
     <span class="badge hold">OPEN</span>
-    {stars}
+    {tier}
     &nbsp; {pnl_block}
   </div>
   <div class="meta">
@@ -281,11 +309,14 @@ def send_daily_summary(signals: list[dict], results: dict, source: str,
     ]
     if signals:
         for s in signals:
-            conf  = s.get("confidence", 0) or 0
-            stars = _stars_text(conf)
-            txt_lines.append(f"{s['signal']:4}  {s['ticker']:<6}  {stars}  ${s.get('price', 0):.2f}")
+            conf = s.get("confidence", 0) or 0
+            tier = _tier_label(conf)
+            txt_lines.append(f"{s['signal']:4}  {s['ticker']:<6}  {tier}  ${s.get('price', 0):.2f}")
             if s.get("rationale"):
-                txt_lines.append(f"      {s['rationale'][:120]}")
+                txt_lines.append(f"      {s['rationale']}")
+            caveat = _confidence_caveat(conf) if s.get("signal") == "BUY" else ""
+            if caveat:
+                txt_lines.append(f"      {caveat}")
     else:
         txt_lines.append("No actionable signals found today.")
 
@@ -324,13 +355,11 @@ def send_push(signals: list[dict]) -> bool:
 
     lines = []
     for s in buys:
-        conf  = s.get("confidence", 0) or 0
-        stars = _stars_text(conf)
-        lines.append(f"🚀 {s['ticker']}  {stars}  ${s.get('price', 0):.2f}")
+        conf = s.get("confidence", 0) or 0
+        lines.append(f"🚀 {s['ticker']}  {_tier_label(conf)}  ${s.get('price', 0):.2f}")
     for s in sells:
-        conf  = s.get("confidence", 0) or 0
-        stars = _stars_text(conf)
-        lines.append(f"🔻 {s['ticker']}  {stars}  ${s.get('price', 0):.2f}")
+        conf = s.get("confidence", 0) or 0
+        lines.append(f"🔻 {s['ticker']}  {_tier_label(conf)}  ${s.get('price', 0):.2f}")
 
     body = "\n".join(lines)
 
@@ -356,6 +385,47 @@ def send_push(signals: list[dict]) -> bool:
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
 
+def _telegram_chat_ids() -> list[str]:
+    """Return all configured Telegram chat IDs (personal + group if set)."""
+    ids = [str(TELEGRAM_CHAT_ID)] if TELEGRAM_CHAT_ID else []
+    if TELEGRAM_GROUP_CHAT_ID and str(TELEGRAM_GROUP_CHAT_ID) not in ids:
+        ids.append(str(TELEGRAM_GROUP_CHAT_ID))
+    return ids
+
+
+def send_to_chat(chat_id, text: str, reply_to_message_id: int | None = None) -> bool:
+    """Send a single HTML message to one Telegram chat. Returns True on success.
+
+    Used both by the outbound alert helpers and by the interactive nexus_bot
+    to reply to whichever chat messaged it.
+    """
+    body = {"chat_id": str(chat_id), "text": text, "parse_mode": "HTML"}
+    if reply_to_message_id is not None:
+        body["reply_to_message_id"] = reply_to_message_id
+    payload = json.dumps(body).encode("utf-8")
+    try:
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            resp.read()
+        return True
+    except Exception as e:
+        print(f"  ✈️  Telegram FAILED (chat {chat_id}): {e}")
+        return False
+
+
+def _telegram_send_text(text: str) -> bool:
+    """Send a text message to all configured Telegram chat IDs."""
+    success = False
+    for chat_id in _telegram_chat_ids():
+        if send_to_chat(chat_id, text):
+            success = True
+    return success
+
 def _build_telegram_message(signals: list[dict]) -> str:
     """Build an HTML-formatted Telegram message."""
     buys  = [s for s in signals if s.get("signal") == "BUY"]
@@ -375,23 +445,24 @@ def _build_telegram_message(signals: list[dict]) -> str:
         lines.append(f"🚀 <b>BUY Signals ({len(buys)})</b>")
         for s in buys:
             conf  = s.get("confidence", 0) or 0
-            stars = _stars_text(conf)
             price = f"${s.get('price', 0):.2f}"
-            lines.append(f"  <b>{_esc(s['ticker'])}</b>  {stars}  {price}")
+            lines.append(f"  <b>{_esc(s['ticker'])}</b>  {_tier_label(conf)}  {price}")
             lines.append(f"  Entry: {price}  |  Stop: {_esc(s.get('stop_loss', '—'))}  |  Target: {_esc(s.get('target', '—'))}")
             if s.get("rationale"):
-                lines.append(f"  <i>{_esc(s['rationale'][:160])}</i>")
+                lines.append(f"  <i>{_esc(s['rationale'])}</i>")
+            caveat = _confidence_caveat(conf)
+            if caveat:
+                lines.append(f"  {_esc(caveat)}")
             lines.append("")
 
     if sells:
         lines.append(f"🔻 <b>SELL Signals ({len(sells)})</b>")
         for s in sells:
             conf  = s.get("confidence", 0) or 0
-            stars = _stars_text(conf)
             price = f"${s.get('price', 0):.2f}"
-            lines.append(f"  <b>{_esc(s['ticker'])}</b>  {stars}  {price}")
+            lines.append(f"  <b>{_esc(s['ticker'])}</b>  {_tier_label(conf)}  {price}")
             if s.get("rationale"):
-                lines.append(f"  <i>{_esc(s['rationale'][:160])}</i>")
+                lines.append(f"  <i>{_esc(s['rationale'])}</i>")
             lines.append("")
 
     return "\n".join(lines).strip()
@@ -404,27 +475,11 @@ def send_telegram(signals: list[dict]) -> bool:
     if not signals:
         return False
 
-    text    = _build_telegram_message(signals)
-    payload = json.dumps({
-        "chat_id":    TELEGRAM_CHAT_ID,
-        "text":       text,
-        "parse_mode": "HTML",
-    }).encode("utf-8")
-
-    try:
-        req = urllib.request.Request(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            resp.read()
-        print(f"  ✈️  Telegram sent → chat {TELEGRAM_CHAT_ID}")
-        return True
-    except Exception as e:
-        print(f"  ✈️  Telegram FAILED: {e}")
-        return False
+    text = _build_telegram_message(signals)
+    ok   = _telegram_send_text(text)
+    if ok:
+        print(f"  ✈️  Telegram sent → {_telegram_chat_ids()}")
+    return ok
 
 
 # ── End-of-day Telegram summary (4★/5★ only) ─────────────────────────────────
@@ -448,57 +503,42 @@ def send_daily_telegram(signals: list[dict]) -> bool:
     lines = [
         "⭐ <b>SWINGTRADER DAILY SUMMARY</b>",
         f"<i>{date}</i>",
-        "<i>3★ + signals</i>",
+        "<i>Tier 1–4 signals</i>",
         "",
     ]
 
     if not buys and not sells:
-        lines.append("📭 No 3★ or higher signals today.")
+        lines.append("📭 No Tier 1–4 signals today.")
     else:
         if buys:
             lines.append(f"🚀 <b>BUY ({len(buys)})</b>")
             for s in buys:
                 conf  = s.get("confidence", 0) or 0
-                stars = _stars_text(conf)
                 price = f"${s.get('price', 0):.2f}"
-                lines.append(f"  <b>{_esc(s['ticker'])}</b>  {stars}  {price}")
+                lines.append(f"  <b>{_esc(s['ticker'])}</b>  {_tier_label(conf)}  {price}")
                 lines.append(f"  Stop: {_esc(s.get('stop_loss', '—'))}  |  Target: {_esc(s.get('target', '—'))}")
                 if s.get("rationale"):
-                    lines.append(f"  <i>{_esc(s['rationale'][:160])}</i>")
+                    lines.append(f"  <i>{_esc(s['rationale'])}</i>")
+                caveat = _confidence_caveat(conf)
+                if caveat:
+                    lines.append(f"  {_esc(caveat)}")
                 lines.append("")
 
         if sells:
             lines.append(f"🔻 <b>SELL ({len(sells)})</b>")
             for s in sells:
                 conf  = s.get("confidence", 0) or 0
-                stars = _stars_text(conf)
                 price = f"${s.get('price', 0):.2f}"
-                lines.append(f"  <b>{_esc(s['ticker'])}</b>  {stars}  {price}")
+                lines.append(f"  <b>{_esc(s['ticker'])}</b>  {_tier_label(conf)}  {price}")
                 if s.get("rationale"):
-                    lines.append(f"  <i>{_esc(s['rationale'][:160])}</i>")
+                    lines.append(f"  <i>{_esc(s['rationale'])}</i>")
                 lines.append("")
 
-    text    = "\n".join(lines).strip()
-    payload = json.dumps({
-        "chat_id":    TELEGRAM_CHAT_ID,
-        "text":       text,
-        "parse_mode": "HTML",
-    }).encode("utf-8")
-
-    try:
-        req = urllib.request.Request(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            resp.read()
-        print(f"  ✈️  Daily Telegram summary sent → chat {TELEGRAM_CHAT_ID}")
-        return True
-    except Exception as e:
-        print(f"  ✈️  Daily Telegram FAILED: {e}")
-        return False
+    text = "\n".join(lines).strip()
+    ok   = _telegram_send_text(text)
+    if ok:
+        print(f"  ✈️  Daily Telegram summary sent → {_telegram_chat_ids()}")
+    return ok
 
 
 # ── Stop/target exit alerts ───────────────────────────────────────────────────
@@ -535,27 +575,11 @@ def send_exit_alert(hits: list[dict]) -> bool:
         lines.append(f"  Entry: ${entry:.2f}  →  Exit: ${cur:.2f}  (<b>{pnl_sign}{pnl:.2f}%</b>)")
         lines.append("")
 
-    text    = "\n".join(lines).strip()
-    payload = json.dumps({
-        "chat_id":    TELEGRAM_CHAT_ID,
-        "text":       text,
-        "parse_mode": "HTML",
-    }).encode("utf-8")
-
-    try:
-        req = urllib.request.Request(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            resp.read()
+    text = "\n".join(lines).strip()
+    ok   = _telegram_send_text(text)
+    if ok:
         print(f"  🔔  Exit alert sent → {[h['ticker'] for h in hits]}")
-        return True
-    except Exception as e:
-        print(f"  🔔  Exit alert FAILED: {e}")
-        return False
+    return ok
 
 
 # ── Combined convenience function ─────────────────────────────────────────────
