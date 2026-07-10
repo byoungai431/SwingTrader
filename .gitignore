@@ -18,6 +18,15 @@ logs/
 # Backtest outputs (large, not needed for the app)
 backtest results/
 
+# Local research / experiment scripts (not part of the deployed app)
+experiments/
+
+# Nexus bot runtime state (poll offset — machine-local)
+.nexus_bot_offset
+
+# Stray junk
+=
+
 # One-time migration scripts
 migrate_to_supabase.py
 
