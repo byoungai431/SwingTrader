@@ -37,6 +37,12 @@ MAX_HOLD_5STAR = 35    # Trading-day hold limit for 5★ trades
 STALE_CUT_DAYS = 12    # Exit after N trading days if gain < 0% (0 = disabled; 5★ exempt)
 IBS_MIN_EXIT   = 0.90  # Exit 5★/5★ MAX when IBS (close near day's high) exceeds this
 
+# ── Shared liquidity filter (dollar-volume rank) ──────────────────────────────
+# Keeps engines that opt in inside the most-tradable names, cutting real-world slippage.
+# Audit 2026-07-12: Engine 6 peaks at top-300 (best win% + OOS Sharpe net of slippage; ranks
+# 300-500 dilute quality). E5 validated BETTER on the full universe, so it is NOT gated here.
+E6_LIQUIDITY_TOP_N = 300  # Engine 6 only fires on names ranked ≤ this by 20d avg dollar volume (0 = disabled)
+
 # ── IBS Entry Filter (mirrors backtest IBS5s25_4s30 config) ───────────────────
 # Require today's bar to close near its LOW before entering — confirms deep
 # oversold exhaustion. Mirrors the optimized backtest's biggest quality driver.
@@ -154,27 +160,32 @@ def _in_e6_cooldown(today: str) -> bool:
         return False
 
 
-def _in_5star_cooldown(today: str) -> bool:
-    """Return True if 5★ BUY entries should be paused due to a consecutive loss streak.
+def _in_5star_cooldown(today: str, engine: str = "E1") -> bool:
+    """Return True if 5★ BUY entries should be paused for the given engine.
 
-    Queries the last CONSEC_5STAR_LOSS_LIMIT closed 5★ positions.  If every one
-    of them was a loss AND the most recent exit falls within CONSEC_5STAR_COOLDOWN_DAYS
-    calendar days, new 5★ BUY signals are suppressed.
+    Queries the last CONSEC_5STAR_LOSS_LIMIT closed 5★ positions for that specific
+    engine only. If every one was a loss AND the most recent exit falls within
+    CONSEC_5STAR_COOLDOWN_DAYS calendar days, new 5★ BUY signals are suppressed.
+    Each engine is evaluated independently — losses from one engine do not pause others.
     """
     try:
         from datetime import datetime, timedelta
         conn = get_conn()
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                """SELECT exit_price, price, exit_date
+                """SELECT exit_price, price, exit_date, rationale
                      FROM signals
                     WHERE signal = 'BUY' AND confidence >= 5 AND exit_price IS NOT NULL
                     ORDER BY exit_date DESC
                     LIMIT %s""",
-                (CONSEC_5STAR_LOSS_LIMIT,)
+                (CONSEC_5STAR_LOSS_LIMIT * 10,)
             )
-            rows = cur.fetchall()
+            all_rows = cur.fetchall()
         conn.close()
+
+        # Filter to only rows matching this engine
+        rows = [r for r in all_rows if _detect_engine(r.get("rationale", "")) == engine]
+        rows = rows[:CONSEC_5STAR_LOSS_LIMIT]
 
         if len(rows) < CONSEC_5STAR_LOSS_LIMIT:
             return False
@@ -329,7 +340,7 @@ _ENGINE_PARAMS = {
     "E4": {"trail_trigger": 0.17, "trail_distance": 0.10, "max_hold": 90, "max_hold_5star": 90, "stale_cut": None, "stale_unconditional": False},
     "E5": {"trail_trigger": 0.08, "trail_distance": 0.04, "max_hold": 30, "max_hold_5star": 30, "stale_cut": 15,  "stale_unconditional": False},
     "E6": {"trail_trigger": 0.08, "trail_distance": 0.04, "max_hold": 25, "max_hold_5star": 25, "stale_cut": 12,  "stale_unconditional": True},
-    "E7":  {"trail_trigger": 0.07, "trail_distance": 0.03, "max_hold": 45, "max_hold_5star": 45, "stale_cut": 35,  "stale_unconditional": False},
+    "E7":  {"trail_trigger": 0.07, "trail_distance": 0.03, "max_hold": 60, "max_hold_5star": 60, "stale_cut": 35,  "stale_unconditional": False},
     "E8":  {"trail_trigger": None, "trail_distance": None, "max_hold": 40, "max_hold_5star": 40, "stale_cut": None, "stale_unconditional": False},
     "E8B": {"trail_trigger": None, "trail_distance": None, "max_hold": 60, "max_hold_5star": 60, "stale_cut": None, "stale_unconditional": False},
 }
@@ -372,8 +383,8 @@ def _check_stop_target_hits(open_positions: list[dict]) -> list[dict]:
         elif target and today_high >= target:
             hit_type = "TARGET"
 
-        # 3. Floor stop for 5★ entries (intraday low)
-        if hit_type is None and conf >= 5 and FLOOR_5STAR > 0 and entry:
+        # 3. Floor stop for 5★ entries (intraday low) — E7 uses its own stop, not FLOOR_5STAR
+        if hit_type is None and conf >= 5 and FLOOR_5STAR > 0 and entry and engine != "E7":
             if today_low <= entry * (1 - FLOOR_5STAR):
                 hit_type = "FLOOR_5STAR"
 
@@ -475,6 +486,32 @@ def fetch_price_data(ticker: str) -> pd.DataFrame:
     return df
 
 
+def _compute_dollar_volume_rank(tickers: list) -> dict:
+    """Rank tickers by 20-day average dollar volume (Close × Volume); rank 1 = most liquid.
+
+    Shared liquidity utility so any engine can restrict itself to the most-tradable names and
+    avoid the illiquid tail where real slippage bites. One batched download. Returns {ticker: rank}
+    for every name with usable data; callers treat a missing ticker as 'not top-ranked'.
+    """
+    if not tickers:
+        return {}
+    raw = yf.download(tickers, period="2mo", progress=False, auto_adjust=True, threads=True)
+    dv = {}
+    if isinstance(raw.columns, pd.MultiIndex):
+        close, vol = raw["Close"], raw["Volume"]
+        for t in tickers:
+            if t in close.columns and t in vol.columns:
+                s = (close[t] * vol[t]).dropna()
+                if len(s) >= 10:
+                    dv[t] = float(s.tail(20).mean())
+    else:  # single-ticker frame
+        s = (raw["Close"] * raw["Volume"]).dropna()
+        if len(s) >= 10:
+            dv[tickers[0]] = float(s.tail(20).mean())
+    ranked = sorted(dv.items(), key=lambda kv: kv[1], reverse=True)
+    return {t: i + 1 for i, (t, _) in enumerate(ranked)}
+
+
 def run():
     if ANTHROPIC_API_KEY == "your-api-key-here":
         print("ERROR: Set your Anthropic API key in config.py before running.")
@@ -501,6 +538,19 @@ def run():
             universe.append(ft)
 
     source   = f"S&P 500 + Indices ({len(universe)} items)" if USE_SP500 else f"Watchlist ({len(universe)} stocks)"
+
+    # ── Shared liquidity rank (gates Engine 6 to top-N by dollar volume) ────────
+    _dv_rank = {}
+    if E6_LIQUIDITY_TOP_N and USE_SP500:
+        try:
+            _dv_rank = _compute_dollar_volume_rank(universe)
+        except Exception as _e:
+            print(f"  ⚠️  dollar-volume rank failed ({_e}); E6 liquidity gate disabled this run")
+    # Only trust the gate if the rank covers most of the universe (else a data hiccup would
+    # wrongly block everything) — fall back to no gate on partial failure.
+    _dv_gate_active = len(_dv_rank) >= 100
+    if _dv_gate_active:
+        print(f"  E6 Liquidity: top-{E6_LIQUIDITY_TOP_N} of {len(_dv_rank)} ranked by $-volume")
 
     # ── Engine 5: pre-compute sector RS rankings ───────────────────────────────
     _sector_map = _get_sp500_sector_map() if USE_SP500 else {}
@@ -598,18 +648,22 @@ def run():
                     generated_signals.append(sig_e5)
 
             # Engine 6: Range Reversion (rule-based — no RSI dependency)
-            if ticker not in _rule_etfs and not _e6_paused and _spy_df is not None:
+            # Liquidity gate: only fire on the top-N most-tradable names (audit: E6 peaks at top-300
+            # net of slippage). Disabled automatically if the rank couldn't be computed this run.
+            _e6_liquid = (not _dv_gate_active) or (_dv_rank.get(ticker, 10**9) <= E6_LIQUIDITY_TOP_N)
+            if ticker not in _rule_etfs and not _e6_paused and _spy_df is not None and _e6_liquid:
                 sig_e6 = get_chop_signal(ticker, df, _spy_df)
                 if sig_e6.get("signal") == "BUY":
                     generated_signals.append(sig_e6)
 
             # Engine 7: Double Bottom (rule-based — no RSI dependency)
             if ticker not in _rule_etfs and _spy_df is not None:
-                sig_e7 = get_pattern_signal(ticker, df, _spy_df)
+                _e7_sector = _sector_map.get(ticker, "")
+                sig_e7 = get_pattern_signal(ticker, df, _spy_df, sector=_e7_sector)
                 if sig_e7.get("signal") == "BUY":
                     generated_signals.append(sig_e7)
                 else:
-                    watch = scan_e7_watching(ticker, df, _spy_df)
+                    watch = scan_e7_watching(ticker, df, _spy_df, sector=_e7_sector)
                     if watch:
                         e7_watching_setups.append(watch)
 
@@ -633,9 +687,11 @@ def run():
                     signal = "NO TRADE"
                     sig["signal"] = "NO TRADE"
 
-                # Suppress 5★ BUY signals during consecutive-loss cooldown (Core only)
-                if signal == "BUY" and conf >= 5 and _in_5star_cooldown(today) and is_core_long:
-                    print(f"         ⏸  5★ cooldown active — skipping {target_ticker}")
+                # Suppress 5★ BUY signals during per-engine consecutive-loss cooldown (E7/E8 exempt)
+                _sig_engine = _detect_engine(sig.get("rationale", ""))
+                _is_e7_or_e8 = _sig_engine in ("E7", "E8", "E8B")
+                if signal == "BUY" and conf >= 5 and is_core_long and not _is_e7_or_e8 and _in_5star_cooldown(today, engine=_sig_engine):
+                    print(f"         ⏸  5★ cooldown active ({_sig_engine}) — skipping {target_ticker}")
                     signal = "NO TRADE"
                     sig["signal"] = "NO TRADE"
 
@@ -790,6 +846,10 @@ def run():
             _target = setup.get("target_price")
             if not (_entry and _stop and _target):
                 continue
+            # Skip if ticker already has an open BUY position
+            if _in_cooldown(_tk, today):
+                print(f"    ⏭  E8 SKIP {_tk:<6} — already has open/recent position")
+                continue
             _entry, _stop, _target = float(_entry), float(_stop), float(_target)
             _risk, _reward = _entry - _stop, _target - _entry
             if _risk <= 0 or (_reward / _risk) < 1.15:
@@ -844,8 +904,13 @@ def run():
         # Refresh positions list after auto-closing hits
         open_positions = _get_open_positions()
 
-    # Daily summary email — always sends (signals or not)
-    perf = get_performance_stats()
+    # Daily summary email — always sends (signals or not).
+    # perf is optional; never let a transient DB hiccup here suppress notifications.
+    try:
+        perf = get_performance_stats()
+    except Exception as e:
+        print(f"  ⚠️  Performance stats unavailable ({e}) — sending notifications without them")
+        perf = None
     send_daily_summary(notify_signals, results, source, skipped, open_positions, perf,
                        vix_level=vix_level, vix_max=VIX_MAX)
     send_push(notify_signals)

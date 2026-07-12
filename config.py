@@ -71,6 +71,13 @@ NTFY_ENABLED = _secret("NTFY_ENABLED", False)
 NTFY_TOPIC   = _secret("NTFY_TOPIC",   "swingtrader-yourname")
 
 # Telegram Bot notifications
-TELEGRAM_ENABLED    = _secret("TELEGRAM_ENABLED",    True)
-TELEGRAM_BOT_TOKEN  = _secret("TELEGRAM_BOT_TOKEN",  "")
-TELEGRAM_CHAT_ID    = _secret("TELEGRAM_CHAT_ID",    "7468464890")
+TELEGRAM_ENABLED       = _secret("TELEGRAM_ENABLED",       True)
+TELEGRAM_BOT_TOKEN     = _secret("TELEGRAM_BOT_TOKEN",     "")
+TELEGRAM_CHAT_ID       = _secret("TELEGRAM_CHAT_ID",       "7468464890")
+TELEGRAM_GROUP_CHAT_ID = _secret("TELEGRAM_GROUP_CHAT_ID", "-4996149844")
+
+# Archie webhook — best-effort forward of BUY / POSITION CLOSED messages to a
+# friend's assistant. No-ops unless ARCHIE_TOKEN is set in secrets.
+ARCHIE_ENABLED = _secret("ARCHIE_ENABLED", True)
+ARCHIE_URL     = _secret("ARCHIE_URL", "https://archie-webhook.rootedfamilytree.org/webhook/swingtrader")
+ARCHIE_TOKEN   = _secret("ARCHIE_TOKEN", "")

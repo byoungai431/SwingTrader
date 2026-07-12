@@ -7,6 +7,7 @@ Telegram: uses the Telegram Bot API — free, instant, works on all platforms.
 """
 
 import html
+import re
 import smtplib
 import urllib.request
 import urllib.error
@@ -21,12 +22,16 @@ try:
         NTFY_ENABLED, NTFY_TOPIC,
         TELEGRAM_ENABLED, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
         TELEGRAM_GROUP_CHAT_ID,
+        ARCHIE_ENABLED, ARCHIE_URL, ARCHIE_TOKEN,
     )
 except ImportError:
     EMAIL_ENABLED          = False
     NTFY_ENABLED           = False
     TELEGRAM_ENABLED       = False
     TELEGRAM_GROUP_CHAT_ID = ""
+    ARCHIE_ENABLED         = False
+    ARCHIE_URL             = ""
+    ARCHIE_TOKEN           = ""
 
 
 # ── Daily summary email ───────────────────────────────────────────────────────
@@ -383,6 +388,43 @@ def send_push(signals: list[dict]) -> bool:
         return False
 
 
+# ── Archie webhook (friend's assistant) ───────────────────────────────────────
+
+def send_to_archie(signal_text: str) -> None:
+    """Best-effort forward of a signal/close message to the Archie webhook.
+
+    Never raises into the notification flow — a slow or down Archie must not
+    delay or break our own Telegram/email sends. No-ops unless a token is set.
+    """
+    if not ARCHIE_ENABLED or not ARCHIE_TOKEN or not signal_text:
+        return
+    # Strip HTML tags/entities so Archie receives clean plain text.
+    clean = html.unescape(re.sub(r"<[^>]+>", "", signal_text)).strip()
+    try:
+        req = urllib.request.Request(
+            ARCHIE_URL,
+            data=json.dumps({"text": clean}).encode("utf-8"),
+            headers={
+                "Content-Type":  "application/json",
+                "Authorization": f"Bearer {ARCHIE_TOKEN}",
+                # Archie is behind Cloudflare, which 403s the default Python-urllib
+                # User-Agent (error 1010). A browser-like UA gets through.
+                "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                               "AppleWebKit/537.36 (KHTML, like Gecko) "
+                               "Chrome/124.0 Safari/537.36"),
+            },
+            method="POST",
+        )
+        # Archie does real work per message (parsing, vault notes, analysis), so it
+        # can take >10s to respond. 30s matches the integration spec. This runs AFTER
+        # the Telegram send, so the wait never delays alert delivery.
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            resp.read()
+        print("  🗄️  Forwarded to Archie")
+    except Exception as e:
+        print(f"  🗄️  Archie push failed: {e}")
+
+
 # ── Telegram ──────────────────────────────────────────────────────────────────
 
 def _telegram_chat_ids() -> list[str]:
@@ -479,6 +521,7 @@ def send_telegram(signals: list[dict]) -> bool:
     ok   = _telegram_send_text(text)
     if ok:
         print(f"  ✈️  Telegram sent → {_telegram_chat_ids()}")
+    send_to_archie(text)
     return ok
 
 
@@ -538,6 +581,8 @@ def send_daily_telegram(signals: list[dict]) -> bool:
     ok   = _telegram_send_text(text)
     if ok:
         print(f"  ✈️  Daily Telegram summary sent → {_telegram_chat_ids()}")
+    if buys or sells:  # only forward actionable signals to Archie
+        send_to_archie(text)
     return ok
 
 
@@ -579,6 +624,7 @@ def send_exit_alert(hits: list[dict]) -> bool:
     ok   = _telegram_send_text(text)
     if ok:
         print(f"  🔔  Exit alert sent → {[h['ticker'] for h in hits]}")
+    send_to_archie(text)  # POSITION CLOSED → Archie
     return ok
 
 

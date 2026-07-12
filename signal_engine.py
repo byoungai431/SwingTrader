@@ -432,7 +432,7 @@ _E5_TOP_N     = 3
 _E5_RS_SHORT  = 20
 _E5_RS_LONG   = 60
 _E5_RS_SLOPE  = 5
-_E5_ENTRY_RSI = 40
+_E5_ENTRY_RSI = 50   # audit 2026-07-12: 40→50 revives a near-dead engine (~4→~94 tr/yr, OOS +5.9%/Sharpe 0.66 net of slippage on live full-500). Energy/Materials kept EXCLUDED (re-enabling hurt OOS).
 
 
 def compute_hot_sectors() -> set:
@@ -780,40 +780,278 @@ def get_chop_signal(ticker: str, df: "pd.DataFrame", spy_df: "pd.DataFrame") -> 
     }
 
 
-# ── ENGINE 7: DOUBLE BOTTOM W2 ANTICIPATION ───────────────────────────────────
-# Detects W1 (first confirmed swing low) via argrelextrema, watches for price
-# to return to the W1 zone, and confirms a bounce on the current bar.
-# Validated: PF 1.79 in-sample (2020–2026), PF 1.75 out-of-sample (2015–2020).
+# ── Engine 7: Classical Double Bottom (Neckline Breakout) ──────────────────────
+import numpy as np
+import pandas as pd
+from scipy.signal import argrelextrema
+
 E7_LOOKBACK        = 150
-E7_ORDER_W1        = 10
-E7_MIN_SEP         = 15
-E7_ZONE_PCT        = 0.05
-E7_CANCEL_PCT      = 0.04
-E7_TOUCH_PCT       = 0.01
-E7_TOUCH_WINDOW    = 5
-E7_NECKLINE_MIN    = 0.03
-E7_DEPTH_WINDOW    = 30
-E7_DEPTH_MIN       = 0.05
-E7_VELOCITY_MIN    = 0.005
-E7_VELOCITY_MAX    = 0.015
-E7_BAR_BODY_MIN    = 0.006
-E7_BAR_BODY_STRONG = 0.010
-E7_VOL_MULT        = 1.5
-E7_VOL_MULT_RELAX  = 1.2
-E7_STOP_PCT        = 0.06
+E7_ORDER_W1        = 8
+E7_DOWNTREND_BARS  = 20
+E7_W1_DEPTH_MIN    = 0.15
+E7_W1_DEPTH_MAX    = 0.25
+E7_NECKLINE_MIN    = 0.05
+E7_W2_W1_TOL       = 0.04
+E7_W2_MIN_SEP      = 15
+E7_W2_MAX_SEP      = 100
+E7_TB_MAX_SEP      = 60
+E7_BREAKOUT_STALE  = 0.05
+E7_STOP_PCT        = 0.05
+E7_W2_VOL_MIN      = 1.2
+E7_PRIOR_LOW_MIN   = 30
+E7_PRIOR_LOW_MAX   = 500
+E7_PRIOR_LOW_TOL   = 0.03
+E7_T1_DEPTH_MIN    = 0.19
+E7_SKIP_SECTORS    = {"Consumer Staples", "Materials"}
 
 
-def get_pattern_signal(ticker: str, df: "pd.DataFrame", spy_df: "pd.DataFrame") -> dict:
-    """
-    Engine 7: Double Bottom W2 Anticipation.
-    Detects W1 via argrelextrema(order=10), then checks if the current bar
-    is a confirming bounce while price is still in the W1 zone.
-    Requires full OHLCV DataFrame (>=200 bars) for both ticker and SPY.
-    """
-    import numpy as np
-    import pandas as pd
-    from scipy.signal import argrelextrema
+def _e7_macd_hist(closes, fast=12, slow=26, signal=9):
+    s    = pd.Series(closes)
+    macd = s.ewm(span=fast, adjust=False).mean() - s.ewm(span=slow, adjust=False).mean()
+    return (macd - macd.ewm(span=signal, adjust=False).mean()).values
 
+
+def _e7_w1_quality_checks(closes, highs, lows, df_full, start, w1_sub, w2_sub):
+    """Returns (neckline_price, depth_pct, at_support) or None."""
+    w1_price = closes[w1_sub]
+
+    neck_slice = highs[w1_sub + 1 : w2_sub]
+    if len(neck_slice) == 0:
+        return None
+    neck_local     = int(np.argmax(neck_slice))
+    neck_sub       = w1_sub + 1 + neck_local
+    neckline_price = float(highs[neck_sub])
+
+    if neckline_price < w1_price * (1 + E7_NECKLINE_MIN):
+        return None
+    if neckline_price <= closes[w2_sub]:
+        return None
+
+    pre_w1_highs = highs[max(0, w1_sub - 20) : w1_sub]
+    if len(pre_w1_highs) < 5:
+        return None
+    prior_high = float(np.max(pre_w1_highs))
+    depth_pct  = (prior_high - w1_price) / prior_high
+    if depth_pct < E7_W1_DEPTH_MIN or depth_pct > E7_W1_DEPTH_MAX:
+        return None
+
+    dt_start = max(0, w1_sub - E7_DOWNTREND_BARS)
+    if w1_sub - dt_start < 5:
+        return None
+    slope = np.polyfit(np.arange(w1_sub - dt_start), closes[dt_start:w1_sub], 1)[0]
+    if slope >= 0:
+        return None
+
+    at_support       = False
+    w1_abs           = start + w1_sub
+    prior_look_start = max(0, w1_abs - E7_PRIOR_LOW_MAX)
+    prior_look_end   = max(0, w1_abs - E7_PRIOR_LOW_MIN)
+    if prior_look_end - prior_look_start >= 20:
+        prior_lows   = df_full.iloc[prior_look_start:prior_look_end]["Low"].squeeze().values.astype(float)
+        prior_minidx = argrelextrema(prior_lows, np.less, order=5)[0]
+        if len(prior_minidx) > 0:
+            swing_lows = prior_lows[prior_minidx]
+            at_support = any(abs(sl - w1_price) / w1_price <= E7_PRIOR_LOW_TOL for sl in swing_lows)
+
+    return neckline_price, depth_pct, at_support
+
+
+def _e7_find_db(df):
+    """Classical double bottom neckline breakout. Returns setup dict or None."""
+    if len(df) < E7_W2_MIN_SEP + E7_ORDER_W1 * 2 + 5:
+        return None
+    as_of_idx = len(df) - 1
+    end   = as_of_idx
+    start = max(0, end - E7_LOOKBACK)
+    sub   = df.iloc[start : end + 1]
+    n     = len(sub)
+
+    if n < E7_W2_MIN_SEP * 2 + E7_ORDER_W1 * 2 + 5:
+        return None
+
+    closes    = sub["Close"].squeeze().values.astype(float)
+    highs     = sub["High"].squeeze().values.astype(float)
+    lows      = sub["Low"].squeeze().values.astype(float)
+    vols      = sub["Volume"].squeeze().values.astype(float) if "Volume" in sub.columns else np.ones(n)
+    cur_close = closes[-1]
+
+    all_mins = argrelextrema(closes, np.less, order=E7_ORDER_W1)[0]
+    if len(all_mins) < 2:
+        return None
+
+    valid_w2 = [i for i in all_mins if 3 <= (n - 1 - i) <= 40]
+    if not valid_w2:
+        return None
+    w2_sub   = valid_w2[-1]
+    w2_price = closes[w2_sub]
+
+    valid_w1 = [i for i in all_mins if i < w2_sub and E7_W2_MIN_SEP <= (w2_sub - i) <= E7_W2_MAX_SEP]
+    if not valid_w1:
+        return None
+
+    for w1_sub in reversed(valid_w1):
+        w1_price = closes[w1_sub]
+
+        if abs(w2_price - w1_price) / w1_price > E7_W2_W1_TOL:
+            continue
+
+        if w2_price < w1_price:
+            macd_hist = _e7_macd_hist(closes)
+            w1_macd   = float(macd_hist[w1_sub]) if w1_sub < len(macd_hist) else 0.0
+            w2_macd   = float(macd_hist[w2_sub]) if w2_sub < len(macd_hist) else 0.0
+            if w2_macd <= w1_macd:
+                continue
+            w2_avg_vol = np.mean(vols[max(0, w2_sub - 20) : w2_sub]) if w2_sub > 0 else vols[w2_sub]
+            if E7_W2_VOL_MIN > 0 and w2_avg_vol > 0 and vols[w2_sub] / w2_avg_vol < E7_W2_VOL_MIN:
+                continue
+
+        result = _e7_w1_quality_checks(closes, highs, lows, df, start, w1_sub, w2_sub)
+        if result is None:
+            continue
+        neckline_price, depth_pct, at_support = result
+
+        if not at_support:
+            continue
+
+        if cur_close <= neckline_price:
+            continue
+        if cur_close > neckline_price * (1 + E7_BREAKOUT_STALE):
+            continue
+
+        avg_vol   = np.mean(vols[max(0, n - 21) : n - 1]) if n > 1 else vols[-1]
+        vol_ratio = float(vols[-1] / avg_vol) if avg_vol > 0 else 1.0
+        w2_type   = "W2_HIGHER" if w2_price >= w1_price else "W2_LOWER_DIV"
+
+        return {
+            "w1_price":       w1_price,
+            "w1_abs_idx":     start + w1_sub,
+            "neckline_price": neckline_price,
+            "w2_price":       w2_price,
+            "entry_price":    cur_close,
+            "stop_price":     neckline_price * (1 - E7_STOP_PCT),
+            "target_price":   neckline_price + (neckline_price - w2_price),
+            "depth_pct":      depth_pct,
+            "vol_ratio":      vol_ratio,
+            "entry_type":     w2_type,
+        }
+
+    return None
+
+
+def _e7_find_tb(df):
+    """Triple bottom neckline breakout. Returns setup dict or None."""
+    if len(df) < E7_W2_MIN_SEP + E7_ORDER_W1 * 2 + 5:
+        return None
+    as_of_idx = len(df) - 1
+    end   = as_of_idx
+    start = max(0, end - E7_LOOKBACK)
+    sub   = df.iloc[start : end + 1]
+    n     = len(sub)
+
+    if n < E7_W2_MIN_SEP * 3 + E7_ORDER_W1 * 3 + 5:
+        return None
+
+    closes    = sub["Close"].squeeze().values.astype(float)
+    highs     = sub["High"].squeeze().values.astype(float)
+    lows      = sub["Low"].squeeze().values.astype(float)
+    vols      = sub["Volume"].squeeze().values.astype(float) if "Volume" in sub.columns else np.ones(n)
+    cur_close = closes[-1]
+
+    all_mins = argrelextrema(closes, np.less, order=E7_ORDER_W1)[0]
+    if len(all_mins) < 3:
+        return None
+
+    valid_w3 = [i for i in all_mins if 3 <= (n - 1 - i) <= 40]
+    if not valid_w3:
+        return None
+    w3_sub   = valid_w3[-1]
+    w3_price = closes[w3_sub]
+
+    valid_w2 = [i for i in all_mins if i < w3_sub and E7_W2_MIN_SEP <= (w3_sub - i) <= E7_TB_MAX_SEP]
+    if not valid_w2:
+        return None
+
+    for w2_sub in reversed(valid_w2):
+        w2_price = closes[w2_sub]
+        if abs(w2_price - w3_price) / w3_price > E7_W2_W1_TOL:
+            continue
+
+        valid_w1 = [i for i in all_mins if i < w2_sub and E7_W2_MIN_SEP <= (w2_sub - i) <= E7_TB_MAX_SEP]
+        if not valid_w1:
+            continue
+
+        for w1_sub in reversed(valid_w1):
+            w1_price = closes[w1_sub]
+
+            all_3 = [w1_price, w2_price, w3_price]
+            if (max(all_3) - min(all_3)) / min(all_3) > E7_W2_W1_TOL:
+                continue
+
+            p1_slice = highs[w1_sub + 1 : w2_sub]
+            p2_slice = highs[w2_sub + 1 : w3_sub]
+            if len(p1_slice) == 0 or len(p2_slice) == 0:
+                continue
+            neckline_price = min(float(np.max(p1_slice)), float(np.max(p2_slice)))
+
+            if neckline_price < w1_price * (1 + E7_NECKLINE_MIN):
+                continue
+            if neckline_price <= w3_price:
+                continue
+
+            pre_w1_highs = highs[max(0, w1_sub - 20) : w1_sub]
+            if len(pre_w1_highs) < 5:
+                continue
+            prior_high = float(np.max(pre_w1_highs))
+            depth_pct  = (prior_high - w1_price) / prior_high
+            if depth_pct < E7_W1_DEPTH_MIN or depth_pct > E7_W1_DEPTH_MAX:
+                continue
+
+            dt_start = max(0, w1_sub - E7_DOWNTREND_BARS)
+            if w1_sub - dt_start < 5:
+                continue
+            slope = np.polyfit(np.arange(w1_sub - dt_start), closes[dt_start:w1_sub], 1)[0]
+            if slope >= 0:
+                continue
+
+            at_support       = False
+            w1_abs           = start + w1_sub
+            prior_look_start = max(0, w1_abs - E7_PRIOR_LOW_MAX)
+            prior_look_end   = max(0, w1_abs - E7_PRIOR_LOW_MIN)
+            if prior_look_end - prior_look_start >= 20:
+                prior_lows   = df.iloc[prior_look_start:prior_look_end]["Low"].squeeze().values.astype(float)
+                prior_minidx = argrelextrema(prior_lows, np.less, order=5)[0]
+                if len(prior_minidx) > 0:
+                    swing_lows = prior_lows[prior_minidx]
+                    at_support = any(abs(sl - w1_price) / w1_price <= E7_PRIOR_LOW_TOL for sl in swing_lows)
+            if not at_support:
+                continue
+
+            if cur_close <= neckline_price:
+                continue
+            if cur_close > neckline_price * (1 + E7_BREAKOUT_STALE):
+                continue
+
+            avg_vol   = np.mean(vols[max(0, n - 21) : n - 1]) if n > 1 else vols[-1]
+            vol_ratio = float(vols[-1] / avg_vol) if avg_vol > 0 else 1.0
+
+            return {
+                "w1_price":       w1_price,
+                "w1_abs_idx":     start + w1_sub,
+                "neckline_price": neckline_price,
+                "w2_price":       w3_price,
+                "entry_price":    cur_close,
+                "stop_price":     neckline_price * (1 - E7_STOP_PCT),
+                "target_price":   neckline_price + (neckline_price - w3_price),
+                "depth_pct":      depth_pct,
+                "vol_ratio":      vol_ratio,
+                "entry_type":     "TRIPLE_BOTTOM",
+            }
+
+    return None
+
+
+def get_pattern_signal(ticker: str, df: "pd.DataFrame", spy_df: "pd.DataFrame", sector: str = "") -> dict:
+    """Engine 7: Classical Double Bottom / Triple Bottom Neckline Breakout."""
     _NO_TRADE = {
         "ticker": ticker, "signal": "NO TRADE", "confidence_stars": 0,
         "strategies_aligned": [], "fundamentals_bonus": False,
@@ -821,12 +1059,13 @@ def get_pattern_signal(ticker: str, df: "pd.DataFrame", spy_df: "pd.DataFrame") 
         "entry_zone": None, "stop_loss": None, "target": None,
     }
 
+    if sector in E7_SKIP_SECTORS:
+        return _NO_TRADE
     if df is None or len(df) < 200:
         return _NO_TRADE
     if spy_df is None or len(spy_df) < 55:
         return _NO_TRADE
 
-    # SPY regime: SPY close > MA50
     spy_close_s = spy_df["Close"].squeeze().dropna()
     if len(spy_close_s) < 55:
         return _NO_TRADE
@@ -834,149 +1073,63 @@ def get_pattern_signal(ticker: str, df: "pd.DataFrame", spy_df: "pd.DataFrame") 
     if pd.isna(spy_ma50_val) or float(spy_close_s.iloc[-1]) <= spy_ma50_val:
         return _NO_TRADE
 
-    # Build aligned OHLCV series (squeeze handles MultiIndex columns from yfinance)
     try:
         close_s = df["Close"].squeeze().dropna()
-        open_s  = df["Open"].squeeze().reindex(close_s.index)
-        low_s   = df["Low"].squeeze().reindex(close_s.index)
-        high_s  = df["High"].squeeze().reindex(close_s.index)
-        vol_s   = df["Volume"].squeeze().reindex(close_s.index).fillna(0) if "Volume" in df.columns \
-                  else pd.Series(0.0, index=close_s.index)
+        if len(close_s) < 200:
+            return _NO_TRADE
     except Exception:
         return _NO_TRADE
 
-    if len(close_s) < 200:
+    setup = _e7_find_db(df)
+    if setup is None:
+        setup = _e7_find_tb(df)
+    if setup is None:
         return _NO_TRADE
 
-    # Current (confirming) bar
-    cur_close = float(close_s.iloc[-1])
-    cur_open  = float(open_s.iloc[-1])
-    cur_low   = float(low_s.iloc[-1])
-    cur_vol   = float(vol_s.iloc[-1])
-    vol_avg20 = float(vol_s.rolling(20).mean().iloc[-1])
+    depth_pct      = setup["depth_pct"]
+    neckline_price = setup["neckline_price"]
+    w1_price       = setup["w1_price"]
+    w2_price       = setup["w2_price"]
+    entry_price    = setup["entry_price"]
+    stop_price     = round(setup["stop_price"], 2)
+    target_price   = round(setup["target_price"], 2)
+    vol_ratio      = setup["vol_ratio"]
+    entry_type     = setup["entry_type"]
 
-    if pd.isna(cur_close) or pd.isna(cur_open):
-        return _NO_TRADE
+    stars = 6 if depth_pct >= E7_T1_DEPTH_MIN else 5
+    w2_label = "triple low" if entry_type == "TRIPLE_BOTTOM" else (
+        "higher low" if w2_price >= w1_price else "lower low + MACD div"
+    )
 
-    # Lookback window — exclude current bar so argrelextrema isn't biased by today
-    lb_close = close_s.iloc[-(E7_LOOKBACK + 1):-1]
-    lb_low   = low_s.iloc[-(E7_LOOKBACK + 1):-1]
-    lb_high  = high_s.iloc[-(E7_LOOKBACK + 1):-1]
-    n = len(lb_close)
-    if n < E7_ORDER_W1 * 2 + E7_MIN_SEP + 5:
-        return _NO_TRADE
-
-    lows_arr  = lb_low.values
-    close_arr = lb_close.values
-    highs_arr = lb_high.values
-
-    # Find confirmed local minima
-    min_idxs = argrelextrema(lows_arr, np.less, order=E7_ORDER_W1)[0]
-    min_idxs = [i for i in min_idxs if i <= n - E7_MIN_SEP - 1]
-    if len(min_idxs) == 0:
-        return _NO_TRADE
-
-    for w1_local_idx in reversed(min_idxs):
-        w1_price = float(lows_arr[w1_local_idx])
-
-        if cur_close > w1_price * (1 + E7_ZONE_PCT):
-            continue    # price not in W1 zone
-        if cur_close < w1_price * (1 - E7_CANCEL_PCT):
-            continue    # support broken
-
-        # Neckline: highest close from W1 onward in lookback
-        neckline = float(close_arr[w1_local_idx:].max())
-        if neckline < w1_price * (1 + E7_NECKLINE_MIN):
-            continue    # no meaningful recovery
-        if cur_close > neckline:
-            continue    # already through target — too late
-
-        # W1 depth from prior high
-        pre_start    = max(0, w1_local_idx - E7_DEPTH_WINDOW)
-        pre_highs    = highs_arr[pre_start: w1_local_idx]
-        if len(pre_highs) == 0:
-            continue
-        high_idx     = int(np.argmax(pre_highs))
-        prior_high   = float(pre_highs[high_idx])
-        if prior_high <= w1_price:
-            continue
-        w1_depth     = prior_high / w1_price - 1
-        if w1_depth < E7_DEPTH_MIN:
-            continue
-
-        # W1 velocity
-        bars_from_high = max(1, len(pre_highs) - high_idx)
-        w1_velocity    = w1_depth / bars_from_high
-        if w1_velocity < E7_VELOCITY_MIN or w1_velocity > E7_VELOCITY_MAX:
-            continue
-
-        # Touch check: last TOUCH_WINDOW bars of lookback + current bar
-        touch_lows = list(lb_low.iloc[-E7_TOUCH_WINDOW:].values) + [cur_low]
-        if not any(l <= w1_price * (1 + E7_TOUCH_PCT) for l in touch_lows):
-            continue
-
-        # Confirming bar must be green and close above W1
-        if cur_close <= cur_open or cur_close <= w1_price:
-            continue
-
-        bar_body = (cur_close - cur_open) / cur_open if cur_open > 0 else 0.0
-        if vol_avg20 > 0:
-            vol_ratio        = cur_vol / vol_avg20
-            above_vol_std    = vol_ratio >= E7_VOL_MULT
-            above_vol_relax  = vol_ratio >= E7_VOL_MULT_RELAX
-        else:
-            vol_ratio = 0.0
-            above_vol_std = above_vol_relax = True
-
-        standard_trigger = bar_body >= E7_BAR_BODY_MIN   and above_vol_std
-        strong_candle    = bar_body >= E7_BAR_BODY_STRONG and above_vol_relax
-
-        if not (standard_trigger or strong_candle):
-            continue
-
-        stop_price = round(w1_price * (1 - E7_STOP_PCT), 2)
-
-        _tier1 = (w1_depth >= 0.20) or (0.010 <= w1_velocity <= 0.015)
-        _stars = 6 if _tier1 else 5
-        _star_label = "5★ MAX" if _stars >= 6 else "5★"
-
-        return {
-            "ticker":             ticker,
-            "signal":             "BUY",
-            "confidence_stars":   _stars,
-            "strategies_aligned": [
-                f"W2 anticipation: W1 support ${w1_price:.2f}, neckline ${neckline:.2f}",
-                f"W1 depth {w1_depth*100:.0f}%, velocity {w1_velocity*100:.2f}%/bar",
-                f"Vol {vol_ratio:.1f}x avg, green bar, SPY above MA50",
-            ],
-            "fundamentals_bonus": False,
-            "rationale": (
-                f"{_star_label} DOUBLE BOTTOM W2 (E7): {ticker} bouncing off W1 support "
-                f"${w1_price:.2f}. Neckline ${neckline:.2f}. "
-                f"Depth {w1_depth*100:.0f}%, vel {w1_velocity*100:.2f}%/bar. "
-                f"Vol {vol_ratio:.1f}x avg."
-            ),
-            "entry_zone": f"${cur_close:.2f}",
-            "stop_loss":  f"${stop_price:.2f}",
-            "target":     f"${neckline:.2f}",
-        }
-
-    return _NO_TRADE
+    return {
+        "ticker":             ticker,
+        "signal":             "BUY",
+        "confidence_stars":   stars,
+        "strategies_aligned": [
+            f"Neckline breakout ${neckline_price:.2f} confirmed, W1 ${w1_price:.2f} / W2 ${w2_price:.2f} ({w2_label})",
+            f"Depth {depth_pct*100:.0f}%, vol {vol_ratio:.1f}x. Stop ${stop_price:.2f}",
+            f"Measured move target ${target_price:.2f}. SPY above MA50.",
+        ],
+        "fundamentals_bonus": False,
+        "rationale": (
+            f"DOUBLE BOTTOM (E7): {ticker} neckline breakout ${neckline_price:.2f}. "
+            f"W1 ${w1_price:.2f} / W2 ${w2_price:.2f} ({w2_label}). "
+            f"Depth {depth_pct*100:.0f}%, vol {vol_ratio:.1f}x. "
+            f"Stop ${stop_price:.2f}, target ${target_price:.2f} (measured move)."
+        ),
+        "entry_zone": f"${entry_price:.2f}",
+        "stop_loss":  f"${stop_price:.2f}",
+        "target":     f"${target_price:.2f}",
+    }
 
 
-def scan_e7_watching(ticker: str, df, spy_df):
+def scan_e7_watching(ticker: str, df, spy_df, sector: str = ""):
     """
-    Returns a setup dict if this ticker has a valid E7 double bottom forming:
-      - W1 detected + depth/velocity pass
-      - Price rallied to neckline (left side of W confirmed)
-      - Price now pulling back below neckline (right side developing)
-      - Support not broken
-    Returns None if no qualifying setup found.
+    Returns a watching dict if this ticker has a valid E7 setup approaching neckline.
+    Returns None if no qualifying pre-breakout setup found.
     """
-    import numpy as np
-    import pandas as pd
-    from scipy.signal import argrelextrema
-
+    if sector in E7_SKIP_SECTORS:
+        return None
     if spy_df is None or len(spy_df) < 55:
         return None
     try:
@@ -985,6 +1138,9 @@ def scan_e7_watching(ticker: str, df, spy_df):
         if float(spy_close_s.iloc[-1]) <= spy_ma50:
             return None
     except Exception:
+        return None
+
+    if df is None or len(df) < 200:
         return None
 
     try:
@@ -1002,120 +1158,94 @@ def scan_e7_watching(ticker: str, df, spy_df):
     if pd.isna(cur_close):
         return None
 
-    lb_close = close_s.iloc[-(E7_LOOKBACK + 1):-1]
-    lb_low   = low_s.iloc[-(E7_LOOKBACK + 1):-1]
-    lb_high  = high_s.iloc[-(E7_LOOKBACK + 1):-1]
-    lb_open  = open_s.iloc[-(E7_LOOKBACK + 1):-1]
-    n = len(lb_close)
-    if n < E7_ORDER_W1 * 2 + E7_MIN_SEP + 5:
+    end   = len(df) - 1
+    start = max(0, end - E7_LOOKBACK)
+    sub   = df.iloc[start : end + 1]
+    n     = len(sub)
+
+    if n < E7_W2_MIN_SEP * 2 + E7_ORDER_W1 * 2 + 5:
         return None
 
-    lows_arr  = lb_low.values
-    close_arr = lb_close.values
-    highs_arr = lb_high.values
-    open_arr  = lb_open.values
+    closes = sub["Close"].squeeze().values.astype(float)
+    highs  = sub["High"].squeeze().values.astype(float)
+    lows   = sub["Low"].squeeze().values.astype(float)
+    vols   = sub["Volume"].squeeze().values.astype(float) if "Volume" in sub.columns else np.ones(n)
 
-    min_idxs = argrelextrema(lows_arr, np.less, order=E7_ORDER_W1)[0]
-    min_idxs = [i for i in min_idxs if i <= n - E7_MIN_SEP - 1]
+    all_mins = argrelextrema(closes, np.less, order=E7_ORDER_W1)[0]
+    if len(all_mins) < 2:
+        return None
 
-    for w1_local_idx in reversed(min_idxs):
-        w1_price = float(lows_arr[w1_local_idx])
+    valid_w2 = [i for i in all_mins if 3 <= (n - 1 - i) <= E7_W2_MAX_SEP]
+    if not valid_w2:
+        return None
+    w2_sub   = valid_w2[-1]
+    w2_price = closes[w2_sub]
 
-        # If a more-recent local minimum is lower than this one, this W1 is
-        # superseded — skip it (visual-only guard; does not affect get_pattern_signal)
-        if any(lows_arr[i] < w1_price for i in min_idxs if i > w1_local_idx):
+    valid_w1 = [i for i in all_mins if i < w2_sub and E7_W2_MIN_SEP <= (w2_sub - i) <= E7_W2_MAX_SEP]
+    if not valid_w1:
+        return None
+
+    for w1_sub in reversed(valid_w1):
+        w1_price = closes[w1_sub]
+
+        if abs(w2_price - w1_price) / w1_price > E7_W2_W1_TOL:
             continue
 
-        zone_top = w1_price * (1 + E7_ZONE_PCT)
+        if w2_price < w1_price:
+            macd_hist = _e7_macd_hist(closes)
+            w1_macd   = float(macd_hist[w1_sub]) if w1_sub < len(macd_hist) else 0.0
+            w2_macd   = float(macd_hist[w2_sub]) if w2_sub < len(macd_hist) else 0.0
+            if w2_macd <= w1_macd:
+                continue
+            w2_avg_vol = np.mean(vols[max(0, w2_sub - 20) : w2_sub]) if w2_sub > 0 else vols[w2_sub]
+            if E7_W2_VOL_MIN > 0 and w2_avg_vol > 0 and vols[w2_sub] / w2_avg_vol < E7_W2_VOL_MIN:
+                continue
 
-        # Neckline = highest close from W1 onward in lookback
-        neckline = float(close_arr[w1_local_idx:].max())
-        if neckline < w1_price * (1 + E7_NECKLINE_MIN):
+        result = _e7_w1_quality_checks(closes, highs, lows, df, start, w1_sub, w2_sub)
+        if result is None:
+            continue
+        neckline_price, depth_pct, at_support = result
+
+        if not at_support:
             continue
 
-        # Price must be pulling back: current below neckline
-        if cur_close >= neckline:
+        # Watching: current close must be below neckline (pre-breakout)
+        if cur_close > neckline_price:
             continue
 
-        # W1 support must never have been broken after W1 formed.
-        # If any bar's low after W1 went below W1, the double bottom is invalid.
-        post_w1_lows = lows_arr[w1_local_idx + 1:]
-        if len(post_w1_lows) > 0 and float(post_w1_lows.min()) < w1_price:
+        # W1 support must not be broken
+        w1_date_idx  = close_s.index.get_indexer([sub.index[w1_sub]], method="nearest")[0]
+        post_w1_lows = low_s.iloc[w1_date_idx + 1:].values.astype(float)
+        if len(post_w1_lows) > 0 and float(np.min(post_w1_lows)) < w1_price * (1 - 0.005):
             continue
 
-        # Current price must still be at or above W1
-        if cur_close < w1_price:
-            continue
+        in_zone        = cur_close >= neckline_price * (1 - E7_BREAKOUT_STALE)
+        pct_above_zone = (neckline_price - cur_close) / neckline_price if neckline_price > 0 else 0.0
 
-        # Check if W2 already confirmed: dipped into zone AND had a bullish
-        # close back above zone_top.  If still below neckline, flag as
-        # missed_active (show in a separate section) rather than dropping it.
-        missed_active   = False
-        neck_local      = int(np.argmax(close_arr[w1_local_idx:])) + w1_local_idx
-        post_nl         = lows_arr[neck_local + 1:]
-        post_nc         = close_arr[neck_local + 1:]
-        post_no         = open_arr[neck_local + 1:]
-        if len(post_nl) > 0 and np.any(post_nl <= zone_top):
-            first_zone  = int(np.argmax(post_nl <= zone_top))
-            w2_confirmed = any(
-                post_nc[i] > zone_top and post_nc[i] > post_no[i]
-                for i in range(first_zone, len(post_nc))
-            )
-            if w2_confirmed:
-                if cur_close < neckline and cur_close > w1_price:
-                    missed_active = True  # trade triggered; heading toward target
-                else:
-                    continue  # fully played out or broken below W1
-
-        # Depth from prior high
-        pre_start  = max(0, w1_local_idx - E7_DEPTH_WINDOW)
-        pre_highs  = highs_arr[pre_start: w1_local_idx]
-        if len(pre_highs) == 0:
-            continue
-        high_idx   = int(np.argmax(pre_highs))
-        prior_high = float(pre_highs[high_idx])
-        if prior_high <= w1_price:
-            continue
-        w1_depth = prior_high / w1_price - 1
-        if w1_depth < E7_DEPTH_MIN:
-            continue
-
-        # Velocity
-        bars_from_high = max(1, len(pre_highs) - high_idx)
-        w1_velocity    = w1_depth / bars_from_high
-        if w1_velocity < E7_VELOCITY_MIN or w1_velocity > E7_VELOCITY_MAX:
-            continue
-
-        in_zone        = (cur_close >= w1_price) and (cur_close <= zone_top)
-        pct_above_zone = max(0.0, (cur_close - zone_top) / zone_top)
-
-        # Build chart slice: 10 bars before W1 → current bar
-        w1_date    = lb_close.index[w1_local_idx]
-        chart_loc  = close_s.index.get_indexer([w1_date], method="nearest")[0]
-        chart_loc  = max(0, chart_loc - 10)
-        df_chart   = pd.DataFrame({
-            "Open":   open_s.iloc[chart_loc:],
-            "High":   high_s.iloc[chart_loc:],
-            "Low":    low_s.iloc[chart_loc:],
-            "Close":  close_s.iloc[chart_loc:],
+        w1_date   = sub.index[w1_sub]
+        chart_loc = close_s.index.get_indexer([w1_date], method="nearest")[0]
+        chart_loc = max(0, chart_loc - 10)
+        df_chart  = pd.DataFrame({
+            "Open":  open_s.iloc[chart_loc:],
+            "High":  high_s.iloc[chart_loc:],
+            "Low":   low_s.iloc[chart_loc:],
+            "Close": close_s.iloc[chart_loc:],
         })
-
-        _tier1 = (w1_depth >= 0.20) or (0.010 <= w1_velocity <= 0.015)
 
         return {
             "ticker":         ticker,
             "w1_price":       round(w1_price, 2),
             "w1_date":        w1_date,
-            "neckline":       round(neckline, 2),
-            "zone_top":       round(zone_top, 2),
+            "neckline":       round(neckline_price, 2),
+            "zone_top":       round(neckline_price, 2),
             "cur_close":      round(cur_close, 2),
-            "depth":          w1_depth,
-            "velocity":       w1_velocity,
+            "depth":          depth_pct,
+            "velocity":       0.0,
             "in_zone":        in_zone,
             "pct_above_zone": pct_above_zone,
+            "tier1":          depth_pct >= E7_T1_DEPTH_MIN,
+            "missed_active":  False,
             "df_chart":       df_chart,
-            "tier1":          _tier1,
-            "missed_active":  missed_active,
         }
 
     return None

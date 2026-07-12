@@ -13,7 +13,6 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 from scipy.signal import argrelextrema
-from datetime import datetime
 
 from chart_analyzer.history import write_backtest_stats
 
@@ -29,6 +28,7 @@ MAX_HOLD       = 40        # bars
 COMMISSION     = 0.001     # 0.1% per side
 COOLDOWN       = 40        # bars between signals on same ticker
 BATCH_SIZE     = 50
+MIN_RR         = 1.15      # skip signals where reward/risk < 1.15:1
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -38,8 +38,7 @@ BATCH_SIZE     = 50
 def _simulate_trades(
     signal_indices: list,
     df: pd.DataFrame,
-    stop_col: str = "stop",
-    target_col: str = "target",
+    max_hold: int = MAX_HOLD,
 ) -> list:
     """
     Given a list of (bar_index, stop_price, target_price) tuples from detection,
@@ -60,13 +59,18 @@ def _simulate_trades(
             continue
         if entry_bar + 1 >= n:
             continue
-
         entry_price = close[entry_bar] * (1 + COMMISSION)
+
+        # Skip signals where reward/risk < MIN_RR
+        risk   = entry_price - stop
+        reward = target - entry_price
+        if risk <= 0 or reward / risk < MIN_RR:
+            continue
         exit_price  = None
         exit_bar    = None
         outcome     = None
 
-        for bar in range(entry_bar + 1, min(entry_bar + MAX_HOLD + 1, n)):
+        for bar in range(entry_bar + 1, min(entry_bar + max_hold + 1, n)):
             if low[bar] <= stop:
                 exit_price = stop * (1 - COMMISSION)
                 exit_bar   = bar
@@ -78,11 +82,20 @@ def _simulate_trades(
                 outcome    = "target"
                 break
         else:
-            exit_bar   = min(entry_bar + MAX_HOLD, n - 1)
+            exit_bar   = min(entry_bar + max_hold, n - 1)
             exit_price = close[exit_bar] * (1 - COMMISSION)
             outcome    = "maxhold"
 
         pnl = (exit_price - entry_price) / entry_price
+
+        # Map bar indices to calendar dates if df has a DatetimeIndex
+        try:
+            entry_date = df.index[entry_bar].strftime("%Y-%m-%d")
+            exit_date  = df.index[exit_bar].strftime("%Y-%m-%d")
+        except Exception:
+            entry_date = None
+            exit_date  = None
+
         trades.append(
             {
                 "entry_bar":   entry_bar,
@@ -94,6 +107,8 @@ def _simulate_trades(
                 "pnl":         pnl,
                 "outcome":     outcome,
                 "bars_held":   exit_bar - entry_bar,
+                "entry_date":  entry_date,
+                "exit_date":   exit_date,
             }
         )
         last_exit_bar = exit_bar
@@ -320,9 +335,8 @@ def _detect_cup_handle(
             if handle_end >= n:
                 break
 
-            handle_low  = np.min(low[right_rim_idx:handle_end])
-            handle_high = np.max(high[right_rim_idx:handle_end])
-            cup_rise    = right_rim - cup_bottom
+            handle_low = np.min(low[right_rim_idx:handle_end])
+            cup_rise   = right_rim - cup_bottom
 
             # Handle retrace ≤ 35% of cup rise
             handle_retrace = (right_rim - handle_low) / cup_rise if cup_rise > 0 else 1
@@ -530,7 +544,7 @@ def run(tickers: list | None = None):
     print("Downloading SPY data for regime filter...")
     spy_raw   = yf.download("SPY", start=BACKTEST_START, end=BACKTEST_END,
                             auto_adjust=True, progress=False)
-    spy_close = spy_raw["Close"].values
+    spy_close = spy_raw["Close"].squeeze().values.astype(float)
     spy_ma50  = pd.Series(spy_close).rolling(50).mean().values
     spy_above = (spy_close > spy_ma50)
     spy_dates = spy_raw.index
@@ -586,7 +600,7 @@ def run(tickers: list | None = None):
                 wdg_signals = _detect_falling_wedge(c, h, lo, v)
 
                 # Simulate using real OHLC
-                all_trades["InvHnS"]      += _simulate_trades(ihs_signals, df)
+                all_trades["InvHnS"]      += _simulate_trades(ihs_signals, df, max_hold=60)
                 all_trades["AscTriangle"] += _simulate_trades(asc_signals, df)
                 all_trades["CupHandle"]   += _simulate_trades(cup_signals, df)
                 all_trades["BullFlag"]    += _simulate_trades(flg_signals, df)
@@ -623,13 +637,144 @@ def run(tickers: list | None = None):
     passed = [s for s in pattern_stats if s["passed"]]
     failed = [s["pattern_type"] for s in pattern_stats if not s["passed"]]
     print("=" * 54)
+    total  = len(pattern_stats)
     suffix = f"  FAILED: {', '.join(failed)}" if failed else ""
-    print(f"PASSED: {len(passed)}/5{suffix}")
+    print(f"PASSED: {len(passed)}/{total}{suffix}")
     print("=" * 54)
 
     write_backtest_stats(pattern_stats)
     print("\nResults written to pattern_backtest_stats table.")
+
+    _print_yearly_vs_spy(all_trades, BACKTEST_START, BACKTEST_END)
+
     return pattern_stats
+
+
+def _print_yearly_vs_spy(all_trades: dict, start: str, end: str):
+    """Print per-year combined pattern return vs SPY buy-and-hold."""
+    POSITION_SIZE = 1_000
+
+    # Fetch SPY annual closes
+    spy_raw = yf.download("SPY", start=start, end=end, auto_adjust=True, progress=False)
+    spy_close = spy_raw["Close"].squeeze()
+
+    # Build year → SPY return map
+    years = sorted({d.year for d in spy_close.index})
+    spy_annual = {}
+    for yr in years:
+        yr_data = spy_close[spy_close.index.year == yr]
+        if len(yr_data) >= 2:
+            spy_annual[yr] = float((yr_data.iloc[-1] - yr_data.iloc[0]) / yr_data.iloc[0] * 100)
+
+    # Flatten all trades, tag with entry year
+    all_flat = []
+    for ptype, trades in all_trades.items():
+        for t in trades:
+            if t.get("entry_date"):
+                try:
+                    yr = int(t["entry_date"][:4])
+                    all_flat.append({
+                        "year":    yr,
+                        "pnl":     t["pnl"],
+                        "win":     t["pnl"] > 0,
+                        "outcome": t.get("outcome", ""),
+                        "ptype":   ptype,
+                    })
+                except Exception:
+                    pass
+
+    # Group by year
+    from collections import defaultdict
+    yearly: dict[int, list] = defaultdict(list)
+    for t in all_flat:
+        yearly[t["year"]].append(t)
+
+    print("\n" + "=" * 90)
+    print("  Year-by-Year: All Patterns Combined vs SPY")
+    print("=" * 90)
+    print(f"  {'Year':<6} {'Trades':>7} {'W/L':>7} {'WR':>6} {'AvgWin':>8} {'AvgLoss':>8} "
+          f"{'Target':>7} {'Stop':>6} {'MaxHold':>8} {'P&L ($)':>10} {'vs SPY':>9}")
+    print(f"  {'-'*6} {'-'*7} {'-'*7} {'-'*6} {'-'*8} {'-'*8} {'-'*7} {'-'*6} {'-'*8} {'-'*10} {'-'*9}")
+
+    all_trades_flat = []
+    for yr in sorted(years):
+        trades_yr  = yearly.get(yr, [])
+        n          = len(trades_yr)
+        win_pnls   = [t["pnl"] for t in trades_yr if t["win"]]
+        loss_pnls  = [t["pnl"] for t in trades_yr if not t["win"]]
+        wr         = len(win_pnls) / n * 100 if n > 0 else 0.0
+        avg_win    = sum(win_pnls)  / len(win_pnls)  * 100 if win_pnls  else 0.0
+        avg_loss   = sum(loss_pnls) / len(loss_pnls) * 100 if loss_pnls else 0.0
+        n_target   = sum(1 for t in trades_yr if t["outcome"] == "target")
+        n_stop     = sum(1 for t in trades_yr if t["outcome"] == "stop")
+        n_maxhold  = sum(1 for t in trades_yr if t["outcome"] == "maxhold")
+        pnl_usd    = sum(t["pnl"] * POSITION_SIZE for t in trades_yr)
+        deployed   = n * POSITION_SIZE
+        ret_pct    = (pnl_usd / deployed * 100) if deployed > 0 else 0.0
+        spy_ret    = spy_annual.get(yr)
+        vs_spy     = (ret_pct - spy_ret) if spy_ret is not None else None
+        vs_str     = f"{vs_spy:+.1f}%" if vs_spy is not None else "  —  "
+        marker     = "✅" if vs_spy is not None and vs_spy > 0 else "❌"
+        sign       = "+" if pnl_usd >= 0 else ""
+        wl_str     = f"{len(win_pnls)}/{len(loss_pnls)}"
+        all_trades_flat.extend(trades_yr)
+        print(f"  {yr:<6} {n:>7} {wl_str:>7} {wr:>5.1f}% {avg_win:>+7.1f}% {avg_loss:>+7.1f}% "
+              f"{n_target:>7} {n_stop:>6} {n_maxhold:>8} {sign}${pnl_usd:>8,.0f} {vs_str:>8} {marker}")
+
+    # Totals
+    all_pnl     = sum(t["pnl"] * POSITION_SIZE for t in all_trades_flat)
+    all_n       = len(all_trades_flat)
+    all_wins    = [t["pnl"] for t in all_trades_flat if t["win"]]
+    all_losses  = [t["pnl"] for t in all_trades_flat if not t["win"]]
+    all_wr      = len(all_wins) / all_n * 100 if all_n > 0 else 0.0
+    all_avgw    = sum(all_wins)   / len(all_wins)   * 100 if all_wins   else 0.0
+    all_avgl    = sum(all_losses) / len(all_losses) * 100 if all_losses else 0.0
+    all_target  = sum(1 for t in all_trades_flat if t["outcome"] == "target")
+    all_stop    = sum(1 for t in all_trades_flat if t["outcome"] == "stop")
+    all_maxhold = sum(1 for t in all_trades_flat if t["outcome"] == "maxhold")
+    all_dep     = all_n * POSITION_SIZE
+    all_ret     = (all_pnl / all_dep * 100) if all_dep > 0 else 0.0
+    spy_total   = float((spy_close.iloc[-1] - spy_close.iloc[0]) / spy_close.iloc[0] * 100)
+    wl_str      = f"{len(all_wins)}/{len(all_losses)}"
+    sign        = "+" if all_pnl >= 0 else ""
+    print(f"  {'-'*6} {'-'*7} {'-'*7} {'-'*6} {'-'*8} {'-'*8} {'-'*7} {'-'*6} {'-'*8} {'-'*10} {'-'*9}")
+    print(f"  {'TOTAL':<6} {all_n:>7} {wl_str:>7} {all_wr:>5.1f}% {all_avgw:>+7.1f}% {all_avgl:>+7.1f}% "
+          f"{all_target:>7} {all_stop:>6} {all_maxhold:>8} {sign}${all_pnl:>8,.0f} {(all_ret-spy_total):>+8.1f}% ")
+    print("=" * 90)
+    print(f"  * Return = P&L on ${POSITION_SIZE:,}/trade vs SPY buy-and-hold per year")
+    print(f"  * Target=hit target | Stop=stopped out | MaxHold=timed out after {MAX_HOLD} bars")
+
+    # Per-pattern exit breakdown
+    print("\n" + "=" * 72)
+    print("  Exit Breakdown by Pattern")
+    print("=" * 72)
+    print(f"  {'Pattern':<22} {'n':>5} {'WR':>6} {'AvgWin':>8} {'AvgLoss':>8} {'Target':>7} {'Stop':>6} {'MaxHold':>8}")
+    print(f"  {'-'*22} {'-'*5} {'-'*6} {'-'*8} {'-'*8} {'-'*7} {'-'*6} {'-'*8}")
+    for t in all_flat:
+        t["_ptype"] = t["ptype"]
+    by_pattern: dict[str, list] = defaultdict(list)
+    for t in all_flat:
+        by_pattern[t["ptype"]].append(t)
+    _LABELS = {
+        "InvHnS":      "Inv Head & Shoulders",
+        "AscTriangle": "Ascending Triangle",
+        "CupHandle":   "Cup & Handle",
+        "BullFlag":    "Bull Flag",
+        "FallingWedge":"Falling Wedge",
+    }
+    for ptype, trades_p in by_pattern.items():
+        np_     = len(trades_p)
+        wp      = [t["pnl"] for t in trades_p if t["win"]]
+        lp      = [t["pnl"] for t in trades_p if not t["win"]]
+        wr_p    = len(wp) / np_ * 100 if np_ > 0 else 0.0
+        avgw_p  = sum(wp) / len(wp) * 100 if wp else 0.0
+        avgl_p  = sum(lp) / len(lp) * 100 if lp else 0.0
+        nt_p    = sum(1 for t in trades_p if t["outcome"] == "target")
+        ns_p    = sum(1 for t in trades_p if t["outcome"] == "stop")
+        nm_p    = sum(1 for t in trades_p if t["outcome"] == "maxhold")
+        label   = _LABELS.get(ptype, ptype)
+        print(f"  {label:<22} {np_:>5} {wr_p:>5.1f}% {avgw_p:>+7.1f}% {avgl_p:>+7.1f}% {nt_p:>7} {ns_p:>6} {nm_p:>8}")
+    print("=" * 72)
 
 
 if __name__ == "__main__":
